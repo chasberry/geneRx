@@ -1,0 +1,423 @@
+% Created 2013-09-12 Thu 11:47
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{fixltx2e}
+\usepackage{graphicx}
+\usepackage{longtable}
+\usepackage{float}
+\usepackage{wrapfig}
+\usepackage[normalem]{ulem}
+\usepackage{textcomp}
+\usepackage{marvosym}
+\usepackage{wasysym}
+\usepackage{amssymb}
+\usepackage{amstext}
+\usepackage{hyperref}
+\tolerance=1000
+%\VignetteIndexEntry{Using geneRxCluster}
+\author{Charles C. Berry}
+\date{\today}
+\title{Using geneRxCluster}
+\hypersetup{
+  pdfkeywords={},
+  pdfsubject={},
+  pdfcreator={Emacs 24.3.1 (Org mode 8.1)}}
+\begin{document}
+
+\maketitle
+\tableofcontents
+
+
+\section{Overview}
+\label{sec-1}
+
+The \verb~geneRxCluster~ package provides some function for exploring
+genomic insertion sites originating from two different
+sources. Possibly, the two sources are two different gene therapy
+vectors. In what follows, some simulations are used to create datasets
+to illustrate functions in the package, but it is not necessary to
+follow the details of the simulations to get an understanding of the
+functions.
+\section{Basic Use}
+\label{sec-2}
+
+It might be helpful to look at these help pages brefly before getting
+started:
+
+\begin{center}
+\begin{tabular}{ll}
+\hline
+Function & Purpose\\
+\hline
+critVal.target & a helper for gRxCluster\\
+gRxCluster & the main function\\
+gRxCluster-object & says what gRxCluster returns\\
+gRxPlot & plots results and crtical regions\\
+gRxSummary & quick summary of results\\
+\hline
+\end{tabular}
+\end{center}
+
+
+\subsection{Reading Data from a File}
+\label{sec-2-1}
+
+The core function in the package is \verb~gRxCluster~ and it requires
+genomic locations and group indicators.  Those basic data might be
+represented by a table like this:
+
+\begin{verbatim}
+chromo    pos   grp
+  chr1 176812 FALSE
+  chr1 191298  TRUE
+  chr1 337906  TRUE
+  chr1 356317  TRUE
+  chr1 516904 FALSE
+  chr1 661124 FALSE
+   .       .       .
+   .       .       .
+   .       .       .
+\end{verbatim}
+
+In \texttt{R} that table might be a \verb~data.frame~ or a collection of three
+equal length vectors. The first one here, \texttt{chromo}, indicates the
+chromosome. The \texttt{pos} column indicates the position on the chromosome
+(and note that the positions have been ordered from lowest to highest),
+and the \texttt{grp} vector indicates which of the two groups the row is
+associated with.
+
+If a table called \texttt{exptData.txt} contained the table above, this
+command would read it in:
+
+<<read-tab,eval=FALSE>>=
+df <- read.table("exptData.txt", header=TRUE)
+@ %def
+
+\subsection{Simulating Data}
+\label{sec-2-2}
+
+Here, \texttt{df} will be simulated. For a start some insertion sites are
+simulated according to a null distribution - i.e. the two sources are
+chosen according to a coin toss at each location. First the chromosome
+lengths are given
+
+<<chromos>>=
+chr.lens <- structure(c(247249719L, 242951149L, 199501827L,
+    191273063L, 180857866L, 170899992L, 158821424L, 146274826L,
+    140273252L, 135374737L, 134452384L, 132349534L, 114142980L,
+    106368585L, 100338915L, 88827254L, 78774742L, 76117153L,
+    63811651L, 62435964L, 46944323L, 49691432L, 154913754L,
+    57772954L), .Names = c("chr1", "chr2", "chr3", "chr4", "chr5",
+    "chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12",
+    "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19",
+    "chr20", "chr21", "chr22", "chrX", "chrY"))
+@ %def
+
+Now a sample is drawn from the chromosomes and for each chromosome a
+sample of positions is drawn. The function \verb~sample.pos~ is defined
+that samples the desired number of positions in the right range. These
+results are placed in a \verb~data.frame~
+
+<<chr-samples>>=
+set.seed(13245)
+chr.names <- names(chr.lens)
+chr.factor <- factor(chr.names,chr.names)
+chrs <- sample(chr.factor,40000,repl=TRUE,
+	       prob=chr.lens)
+chr.ns <- table(chrs)
+sample.pos <- function(x,y) sort(sample(y,x,repl=TRUE))
+chr.pos <-
+    mapply( sample.pos, chr.ns,chr.lens,SIMPLIFY=FALSE)
+df <-
+    data.frame(chromo=rep(chr.factor,chr.ns),
+	       pos=unlist(chr.pos))
+@ %def
+
+
+Now two groups are sampled as a logical vector:
+
+<<grp-samp>>=
+df$grp <-
+    rbinom(40000, 1, 0.5)==1
+@ %def
+\subsection{Invoking \texttt{gRxCluster}}
+\label{sec-2-3}
+
+With this \texttt{data.frame} the function can be invoked.
+<<null-run,keep.source=TRUE>>=
+require(geneRxCluster,quietly=TRUE)
+null.results <-
+    gRxCluster(df$chromo,df$pos,df$grp,15L:30L,nperm=100L)
+as.data.frame(null.results)[,c(-4,-5)]
+@ %def
+
+The function call specified window widths of \texttt{15L:30L} sites and
+called for 100 permutations of the data with \verb~nperm=100L~.
+
+The resulting object, \verb~null.results~, is a \texttt{GRanges} object (which is
+supported by the \texttt{GenomicRanges} package \cite{lawrence2013software})
+has 5 clumps. These clumps can be compared to the number of expected
+False Discoveries by invoking the function \verb~gRxSummary~:
+
+<<grxsmry>>=
+gRxSummary( null.results )
+@ %def
+
+
+The printed summary indicates 5 clusters (or clumps) were discovered,
+and that the estimated False Discovery Rate was 0.68 is a bit less
+than 1.0, which we know to be the actual False Discovery
+Rate. However, this is well within the bounds of variation in a
+simulation like this. The last part of the printout shows the values
+of all the arguments used in the call to \verb~gRxCluster~ including two
+that were filled in by default, and which will be discussed later on.
+
+\subsection{Simulating Clumps}
+\label{sec-2-4}
+
+Let's look at another example, but first add some true clumps to the
+simulation. We start by sampling chromosomes 30 times:
+
+<<sim-true>>=
+clump.chrs <- sample(chr.factor,30,repl=TRUE,
+		 prob=chr.lens)
+@ %def
+
+For each sample a position is chosen using the \verb~sample.pos~ function
+defined above
+\begin{verbatim}
+
+\end{verbatim}
+<<>>=
+clump.chr.pos.bound <-
+    sapply(chr.lens[clump.chrs], function(y) sample.pos(1,y))
+@ %def
+
+For each position, the number of sites in the clump is determined:
+
+<<>>=
+clump.site.ns <- rep(c(15,25,40),each=10)
+@ %def
+
+For every position, nearby sites ($<1$ Mbase) are sampled:
+
+<<keep.source=TRUE>>=
+clump.sites <-
+    lapply(seq_along(clump.chrs),
+	   function(x) {
+	       chromo <- clump.chrs[x]
+	       n <- clump.site.ns[x]
+	       ctr <- clump.chr.pos.bound[x]
+	       chrLen <- chr.lens[chromo]
+	       if (ctr<chrLen/2)
+		   {
+		       ctr + sample(1e6,n)
+		   } else {
+		       ctr - sample(1e6,n)
+		   }
+	   })
+@ %def
+
+and grps are assigned to each clump
+
+<<>>=
+clump.grps <- rep(0:1,15)==1
+@ %def
+
+then a \texttt{data.frame} is constructed, added to the \verb~df~ \texttt{data.frame} and
+the positions are put in order:
+<<keep.source=TRUE>>=
+df2 <- data.frame(
+    chromo=rep(clump.chrs,clump.site.ns),
+    pos=unlist(clump.sites),
+    grp=rep(clump.grps,clump.site.ns)
+    )
+
+df3 <- rbind(df,df2)
+df3 <- df3[order(df3$chromo,df3$pos),]
+@ %def
+
+Finally, the clump discovery takes place:
+<<alt-clumps,keep.source=TRUE>>=
+alt.results <-
+    gRxCluster(df3$chromo,df3$pos,df3$grp,
+	       15L:30L, nperm=100L)
+gRxSummary(alt.results)
+@ %def
+
+There were plenty of clumps discovered. Were they the simulated clumps
+or just False Discoveries? Several functions from the \verb~GenomicRanges~
+package \cite{lawrence2013software} are useful in sorting this out.
+Here sites in the simulated clumps are turned into a \verb~GRanges~ object.
+
+<<torf-disc,keep.source=TRUE>>=
+df2.GRanges <-
+    GRanges(seqnames=df2$chromo,IRanges(start=df2$pos,width=1),
+	    clump=rep(1:30,clump.site.ns))
+@ %def
+
+The function \verb~findOverlaps~  is used
+to map the regions in which clumps were found to the sites composing
+those simulated clumps, then the function \verb~subjectHits~ indicates
+which of the simulated clumps were found.
+
+
+<<>>=
+clumps.found <- subjectHits(findOverlaps(alt.results,df2.GRanges))
+@ %def
+
+Finally, the number of sites in the simulated clumps that are covered
+by each estimated clump is printed.
+
+<<keep.source=TRUE>>=
+matrix(
+    table(factor(df2.GRanges$clump[ clumps.found ],1:30)),
+    nrow=10,dimnames=list(clump=NULL,site.ns=c(15,25,40)))
+@ %def
+
+Notice that fewer than half of the clumps consisting of just 15 sites
+are found, the clumps of 25 sites are usually found, but usually all
+of the sites composing each clump are not found. The clumps formed
+from 40 sites are found and all or almost all of the sites in each
+clump are found.
+
+And here the clumps that are False Discoveries are counted by using
+the \verb~countOverlaps~ function
+
+<<>>=
+sum( countOverlaps(alt.results, df2.GRanges ) == 0 )
+@ %def
+
+\section{Customizing Critical Regions and Filters}
+\label{sec-3}
+
+
+The critical regions used above can be displayed like this:
+
+<<alt-res,fig=TRUE>>=
+gRxPlot(alt.results,method="criticalRegions")
+@ %def
+
+Notice that the regions are not perfectly symmetrical. This is because
+the proportions of the two classes are not exactly equal:
+
+
+<<>>=
+xtabs(~grp, df3)
+@ %def
+
+
+The \verb~gRxCluster~ function provides a means of using another set of
+criitical regions and another filter expression. The expression for
+settings up critical regions is found in the is found in the
+\verb~metadata()~ slot of \verb~alt.results~ in the \texttt{\$call} component:
+
+<<>>=
+as.list(metadata(alt.results)$call)[['cutpt.tail.expr']]
+@ %def
+
+The expression is evaluated in an enviroment that has objects \verb~k~,
+\verb~n~, and an object called \verb~x~ that the expression may use.  The object
+\verb~k~ is a set of values for the number of sites to include in a window,
+\verb~n~ is the results of \verb~table(df3$grp)~, and \verb~x~ is a matrix of the
+lagged differences of \verb~df3[,"pos"]~. The lags of order \texttt{(15:30)-1}
+(setting those that cross chromosome boundaries to \verb~NA~) make up the
+columns of \verb~x~.
+
+One obvious change that a user might make is to reset the value of
+\verb~target~.
+
+<<keep.source=TRUE>>=
+generous.target.expr <-
+    quote(critVal.target(k,n, target=20, posdiff=x))
+generous.results <-
+    gRxCluster(df3$chromo,df3$pos,df3$grp,
+	       15L:30L,nperm=100L,
+	       cutpt.tail.expr=generous.target.expr)
+gRxSummary(generous.results)
+@ %def
+
+Many more discoveries are made, but look at the count of false discoveries:
+
+<<>>=
+sum( 0==countOverlaps(generous.results,df2.GRanges))
+@ %def
+
+
+The filter function is also found in the \verb~metadata()~ slot of
+\verb~alt.results~ in the \texttt{\$call} component:
+
+<<>>=
+as.list(metadata(alt.results)$call)[['cutpt.filter.expr']]
+@ %def
+
+
+\verb~alt.result~ filtered out the windows whose widths were less than the
+median number of bases. The expression is evaluated in the enviroment
+as before, but only the object \verb~x~ has been added in at the time the
+expression is called.  If filtering is not desired it can be tunred
+off by using an expression that returns values higher than any seen in
+\verb~x~ such as this:
+
+
+<<keep.source=TRUE>>=
+no.filter.expr <- quote(rep(Inf,ncol(x)))
+no.filter.results <-
+    gRxCluster(df3$chromo,df3$pos,df3$grp,15L:30L,nperm=100L,
+	       cutpt.filter.expr=no.filter.expr)
+gRxSummary(no.filter.results)
+@ %def
+
+The effect of using non-specific filters to increase power is applied
+in gene-expression microarray studies \cite{bourgon2010independent}.
+The less stringent filtering results in fewer discoveries, but the
+number of false discoveries also decreased:
+
+<<>>=
+sum( 0==countOverlaps(no.filter.results,df2.GRanges))
+@ %def
+
+
+Here a more stringent filter is used
+
+<<keep.source=TRUE>>=
+hard.filter.expr <-
+    quote(apply(x,2,quantile, 0.15, na.rm=TRUE))
+hard.filter.results <-
+    gRxCluster(df3$chromo,df3$pos,df3$grp,15L:30L,
+	       nperm=100L,
+	       cutpt.filter.expr=hard.filter.expr)
+gRxSummary(hard.filter.results)
+@ %def
+
+The number of discoveries here needs to be corrected for the number of
+false discoveries if comparisons are to be made:
+
+<<>>=
+sum( 0==countOverlaps(hard.filter.results,df2.GRanges))
+@ %def
+
+It seems to do a bit better than the other two alternatives when true
+and false discovery numbers are considered.
+
+
+
+\begin{thebibliography}{1}
+  
+\bibitem{lawrence2013software}
+  Michael Lawrence, Wolfgang Huber, Herv{\'e} Pag{\`e}s, Patrick Aboyoun, Marc
+  Carlson, Robert Gentleman, Martin~T Morgan, and Vincent~J Carey.
+  \newblock Software for computing and annotating genomic ranges.
+  \newblock {\em PLoS Computational Biology}, 9(8):e1003118, 2013.
+  
+\bibitem{bourgon2010independent}
+  R.~Bourgon, R.~Gentleman, and W.~Huber.
+  \newblock {Independent filtering increases detection power for high-throughput
+    experiments}.
+  \newblock {\em Proceedings of the National Academy of Sciences}, 107(21):9546,
+  2010.
+
+\end{thebibliography}
+% Emacs 24.3.1 (Org mode 8.1)
+\end{document}
