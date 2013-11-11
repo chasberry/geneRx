@@ -22,7 +22,8 @@ packages. To install them, issue these commands in R
 
 <div class="verbatim">
 
-   source("<http://bioconductor.org/biocLite.R>")
+   source("http://bioconductor.org/biocLite.R")
+
    biocLite("GenomicRanges")
 
 </div>
