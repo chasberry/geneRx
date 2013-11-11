@@ -21,9 +21,9 @@ The package requires the GenomicRanges and IRanges bioConductor
 packages. To install them, issue these commands in R
 
 <div class="verbatim">
-
    source("http://bioconductor.org/biocLite.R")
-
-   biocLite("GenomicRanges")
-
 </div>
+<div class="verbatim">
+   biocLite("GenomicRanges")
+</div>
+
