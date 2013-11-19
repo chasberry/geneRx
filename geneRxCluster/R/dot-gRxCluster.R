@@ -1,4 +1,3 @@
-
 ##' @include grx_clust_Call.R
 ##' @include Rutils.R
 .gRxCluster <-
@@ -31,14 +30,36 @@
     
         ## check chr.starts, chr.ends, starts, kvals, nperm, and (maybe)
         ## cutpt.* expr's
+
+
+        was.quoted <- function(x){
+            is.name(x) ||
+            isTRUE(try(is.language(x),TRUE)) &&
+                isTRUE(try(is.call(x),TRUE))
+        }
         
+        nperm <- as.integer(nperm)
         stopifnot( length(chr.starts)==length(chr.ends) )
-    
+ 
         stopifnot( tail(chr.ends,1)==length(starts) )
         stopifnot( is.integer(kvals) && all(kvals>1) )
         stopifnot( nperm >= 0 )
-        stopifnot( is.language( cutpt.filter.expr ) )
-        stopifnot( is.language( cutpt.tail.expr ) )
+        if (is.atomic(cutpt.filter.expr))
+            {
+                cfe <- as.double(cutpt.filter.expr)
+                if (length(cfe)!=1 || any(is.na(cfe)))
+                    stop("bad cutpt.filter.expr arg")
+                cutpt.filter.expr <-
+                    bquote(rep(.(atom),length=ncol(x)),
+                           list(atom=cfe))
+            }
+        else
+            {
+                if (!was.quoted(cutpt.filter.expr))
+                    stop("cutpt.filter.expr malformed ??")
+            }
+        if (!was.quoted(cutpt.tail.expr))
+            stop("cutpt.tail.expr not in quote() ??")
         stopifnot( all(as.integer(group) %in% 0:1 ) )
         stopifnot( all( head(kvals,-1) < tail(kvals,-1) ) )
         pruneFun <- match.fun(pruneFun)
@@ -69,7 +90,8 @@
               "cutptSdiff")
         ## prune
         smat <- res[['summary_matrix']][[1]]
-        
+
+
         gr <-
             GRanges(seqnames =
                     if (length(sn)) {
@@ -83,9 +105,11 @@
                     value2= smat[,5],
                     clump.id= res[["cluster_id"]][smat[,1]])
         
-        
-        pruned <- pruneFun(gr,
-                           prop.table(table(group))[1])
+        pruned <-
+            if (length(gr))
+                pruneFun(gr, prop.table(table(group))[1])
+            else
+                gr
         
         ## the first cluster_best element is always not in a cluster,
         ## but can be smallish near conflicts

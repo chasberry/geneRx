@@ -1,11 +1,14 @@
-
 ##' best contiguous region
 ##'
 ##' prune each end of the region using loglik criterion
 ##' @title prune.loglik
 ##' @param x a GRanges object
 ##' @param p.null the probability of category 1 (FALSE)
-##' @return genomewide probability of the FALSE category
+##' @details this is to be used as the \code{pruneFun} are of \code{gRxCluster}
+##  @return same as \code{\link{gRxCluster}} less the \code{metadata}
+##' @seealso \code{\link{gRxCluster-object}} for details on what this
+##' function returns.
+##' @export
 ##' @author Charles Berry
 prune.loglik <- function(x,p.null=0.5)
 {
@@ -66,6 +69,35 @@ prune.loglik <- function(x,p.null=0.5)
     unlist(GRangesList( clmp.list ))
 }
 
+##' join contiguous windows
+##'
+##' return all the candidate sites in a clump without pruning
+##' @title noprune
+##' @param x a GRanges object
+##' @param ... currently unused
+##' @details this is to be used as the \code{pruneFun} are of \code{gRxCluster}
+##' @return same as \code{\link{gRxCluster}} less the \code{metadata}
+##' @seealso \code{\link{gRxCluster-object}} for more details on what
+##' this function returns.
+##' @export
+##' @author Charles Berry
+noprune <-
+    function(x,...){
+        firsts <- which( !duplicated(x$clump.id) )
+        lasts <- which( !duplicated(x$clump.id, fromLast=TRUE ) )
+        sn <- seqnames(x)[firsts]
+        sts <- start(x)[firsts]
+        ends <- end(x)[lasts]
+        vals1 <- tapply(mcols(x)[,2],x$clump.id,sum)
+        vals2 <- tapply(mcols(x)[,3],x$clump.id,sum)
+        id <- x$clump.id[firsts]
+        GRanges(seqnames=sn,
+                IRanges(start=sts,end=ends),
+                value1=vals1,
+                value2=vals2,
+                clump.id=id)
+    }
+
 ##' critical region cutpoints
 ##'
 ##' This version uses alpha and will find TFD
@@ -76,10 +108,12 @@ prune.loglik <- function(x,p.null=0.5)
 ##' @param posdiff - position difference matrix
 ##' @return list of cutoffs and attributes
 ##' @seealso \code{\link{gRxCluster}} for how and why this function is used
+##' @example inst/ex-critVal-simple.R
 ##' @author Charles Berry
 ##' @export
 critVal.alpha <-
     function(k,p0,alpha,posdiff){
+        p0 <- prop.table(p0) # safely
         ns <- colSums(!is.na(posdiff))
         tails <-
             mapply(function(kelt,n){
@@ -151,6 +185,7 @@ critVal.target <-
 ##' @param odds - alternative odds ratio
 ##'  @return list of cutoffs and attributes
 ##' @seealso \code{\link{gRxCluster}} for how and why this function is used
+##' @example inst/ex-critVal-power.R
 ##' @author Charles Berry
 ##' @export
 critVal.power <-
@@ -196,94 +231,17 @@ critVal.power <-
             
 }
 
-##' find cutpoints
+##' Plot a set of cutpoints - Utility
 ##'
-##' find cutpoints based on expected number of False Discoveries in
-##' each tail. From gRxCluster, this is called after
-##' cutpt.filter.expr, so \code{x} - the sdiff object will be
-##' available.
-##' @title setup.threshhold.binom
-##' @param k    the window widths   
-##' @param n    e.g. table(group)                           
-##' @param val  maximum one tailed nominal alpha to determine cutpoints
-##' @return a list
-##' @seealso \code{\link{gRxCluster}} for how and why this function is used
-##' @author Charles Berry
-cutpt.threshhold.binom <-
-    function(k,n,val)
-    {
-        if (val<0.0 || val>1.0) stop("val must be in [0,1]") 
-        p.nought <- prop.table(n)[1]
-        threshhold.binom(k,val,p.nought)
-    }
-
-##' find cutpoints utility
-##'
-##' find cutpoints based on expected number of False Discoveries in
-##' each tail. Not for end-user use.
-##' @title setup threshhold.binom
-##' @param k  window widths 
-##' @param val  nominal alpha (length(val) %in% c(1,length(k)))
-##' @param p0 null value
-##' @return a list
-##' @author Charles Berry
-threshhold.binom <-
-    function(k,val,p0)
-    {
-        ##  ccnt matrix of counts of efun_vals
-        ##  k the window widths for each column of ccnt
-        ##  n table(efun_vals)
-        ##  val the target for alpha
-
-        if (length(val)==1) val <- rep(val,length(k))
-        stopifnot(length(val)==length(k))
-        
-        bino.prs <-
-            lapply(k, function(ki) {
-                dh <- dbinom(ki:0, ki, p0 )
-                dim(dh) <- c(1,ki+1)
-                colnames(dh) <- 0:ki
-                dh})
-        bino.median.index <-
-            sapply(bino.prs,
-                   function(x) which(cumsum(x)>=0.5)[1])
-        e.tails <-
-            lapply(bino.prs,
-                   function(hp){
-                       lower <- cumsum(hp)
-                       upper <- rev(cumsum(rev(hp)))
-                       cbind(up=upper,low=lower)})
-        for (i in seq_along(e.tails))
-            attr(e.tails[[i]],"val") <- val[i] 
-        
-        ctv.result <- function(et){
-            
-            fdr_low <- et[,'low']
-            fdr_up <- et[,'up']
-            low_cut <- tail(which(fdr_low < attr(et,"val")),1)
-            high_cut <- head(which(fdr_up < attr(et,"val")),1)
-            res <- 
-                c(low= if (length(low_cut)) low_cut else 0,
-                  up= if (length(high_cut)) high_cut-1 else length(fdr_up))
-            attr(res,"fdr") <- et[,c("low","up")]
-            attr(res,"val") <- attr(et,"val")
-            res
-        }
-                
-        lapply( e.tails,ctv.result)
-    }
-
-##' Plot a set of cutpoints
-##'
-##' not for users. not exported
+##' NOT FOR USERS. Not exported.
 ##' @title plot.cutpoints
 ##' @param crit - a cutpoint object see \code{\link{gRxCluster}}
 ##' @param pi.0 - optional null value to plot
 ##' @param kvals - which cutpoints to includein the plot
 ##' @param ... passed to barplot
-##' @return list with components of \dQuote{bar.x} (the value of
-##' \code{hist()}), \dQuote{kvals} (window widths plotted), and
-##' \dQuote{pi.0} (the input vlue of \code{pi.0}
+##' @return list with components of \dQuote{\code{bar.x}} (the value of
+##' \code{hist()}), \dQuote{\code{kvals}} (window widths plotted), and
+##' \dQuote{\code{pi.0}} (the input value of \code{pi.0})
 ##' @author Charles Berry
 plot.cutpoints <-
     function(crit, pi.0=NULL, kvals=NULL, ...){

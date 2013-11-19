@@ -1,4 +1,3 @@
-
 ##' Plot Clumps and/or Critical Regions
 ##'
 ##' The results of a call to \code{\link{gRxCluster}} are plotted. Optionally, with
@@ -19,6 +18,7 @@
 ##' @seealso \code{\link{gRxPlotClumps}} for a more fine grained display
 ##' @return see \code{\link{hist}}
 ##' @include gRxCluster.R
+##' @example inst/ex-gRxPlot.R
 ##' @export
 ##' @author Charles Berry
 gRxPlot <- function(object,pi.0=NULL, method=c("odds","criticalRegions"),
@@ -27,18 +27,19 @@ gRxPlot <- function(object,pi.0=NULL, method=c("odds","criticalRegions"),
     match.methods <- match.arg(method, several.ok=TRUE)
 
     if (any(match.methods=="odds" )){
-        if (!inherits(object,"DataFrame"))
-            stop("need Granges object for method='odds'")
         vals <- as.data.frame(mcols(object)[,c("value1","value2")])
-        log.odds <- qlogis((vals$value2+0.5)/(rowSums(vals)+1)) - 
-            if (is.null(pi.0)) qlogis((sum(vals$value2)+0.5)/(sum(vals)+1))
-            else
-                qlogis( pi.0)
-        hx <- hist( log.odds , breaks=breaks, plot=FALSE )
-        louter <- if (is.null(xlim)) c(-1,1)*max(abs(hx$breaks)) else xlim
-        plot(hx,xlim=louter,xlab=xlab,main=main,...)
+        if (nrow(vals)){
+            log.odds <- qlogis((vals$value2+0.5)/(rowSums(vals)+1)) - 
+                if (is.null(pi.0)) qlogis((sum(vals$value2)+0.5)/(sum(vals)+1))
+                else
+                    qlogis( pi.0)
+            hx <- hist( log.odds , breaks=breaks, plot=FALSE )
+            louter <- if (is.null(xlim)) c(-1,1)*max(abs(hx$breaks)) else xlim
+            plot(hx,xlim=louter,xlab=xlab,main=main,...)
+        } else {
+            warning("No clumps to plot for method = \"odds\"")
+        }
     }
-
     if (any(match.methods=="criticalRegions")){
         if (inherits(object,"GRanges"))
             ctpt <- metadata(object)$criticalValues

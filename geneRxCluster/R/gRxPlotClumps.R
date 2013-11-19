@@ -1,4 +1,3 @@
-
 ##' Plot gRxCluster object clumps
 ##'
 ##' Plot Relative Frequencies of the two classes according to

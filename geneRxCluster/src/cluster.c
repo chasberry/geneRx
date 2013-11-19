@@ -4,6 +4,7 @@
 
 
 #include <Rmath.h>
+#include <R_ext/Utils.h>
 
 
 
@@ -564,10 +565,10 @@ SEXP gRxC_cluster ( SEXP chromoSts, SEXP chromoEnds, SEXP strt, SEXP grp, SEXP k
  int cutptSdiff_n = length( cutptSdiff );
  
  if (cutptSdiff_n != kvals_n)
-   error( "cutptExprs returned the wrong length");
+   error( "cutpt.filter.expr returned the wrong length");
  
  if (!isReal(cutptSdiff))
-   error("cutptExprs result must pass is.double()");
+   error("cutpt.filter.expr result must yield double");
  
  int l=0;
  for (int i = 0; i<kvals_n; i++){
@@ -582,6 +583,7 @@ SEXP gRxC_cluster ( SEXP chromoSts, SEXP chromoEnds, SEXP strt, SEXP grp, SEXP k
  // Rprintf("enter permute\n");
  
  for (int iperm = perm_n; iperm >= 0; iperm--){
+   R_CheckUserInterrupt();
    if (iperm==0) // last time thru, use grp_orig 
      copyVector( grp, grp_orig );
    else 

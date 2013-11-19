@@ -1,4 +1,3 @@
-
 ##' Differenital Clustering of Integration Sites
   ##'
   ##' geneRxCluster provides the function \code{\link{gRxCluster}} and friends.

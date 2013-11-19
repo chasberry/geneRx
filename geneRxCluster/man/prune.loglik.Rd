@@ -9,16 +9,20 @@
 
   \item{p.null}{the probability of category 1 (FALSE)}
 }
-\value{
-  genomewide probability of the FALSE category
-}
 \description{
   best contiguous region
 }
 \details{
   prune each end of the region using loglik criterion
+
+  this is to be used as the \code{pruneFun} are of
+  \code{gRxCluster}
 }
 \author{
   Charles Berry
+}
+\seealso{
+  \code{\link{gRxCluster-object}} for details on what this
+  function returns.
 }
 

@@ -25,7 +25,6 @@
   This version uses TFD and will find alpha implicitly
 }
 \examples{
-
 # symmetric odds:
 crit <- critVal.target(5:25,c(1,1),1,ns=rep(10,21))
 crit[[1]]
@@ -36,6 +35,7 @@ asymmetric.crit <- critVal.target(5:25,c(1,5),1,ns=rep(10,21))
 par(mfrow=c(1,2))
 gRxPlot(crit,method="critical")
 gRxPlot(asymmetric.crit,method="critical")
+rm(crit,asymmetric.crit)
 }
 \author{
   Charles Berry

@@ -19,19 +19,25 @@
 
   \item{nperm}{number of permutations for FDR calculation}
 
-  \item{pruneFun}{a function like prune.loglik}
+  \item{pruneFun}{a function like \code{prune.loglik}.}
 
   \item{...}{other args}
 
-  \item{cutpt.filter.expr}{(optional) R expr with
-  (optional) var x (window widths in base pairs) to filter
-  windows must eval to mode "double"}
+  \item{cutpt.filter.expr}{(optional) a R call (or variable
+  naming a call) with (optional) var x ##' (window widths
+  in base pairs) to filter windows must eval to mode ##'
+  "double". If not specified, ##'
+  \code{as.double(apply(x,2,median,na.rm=TRUE))} is used.
+  If is an atomic vector of length one is supplied it is
+  expanded to the proper length and coerced to double.}
 
-  \item{cutpt.tail.expr}{R expr with (optional) vars: k,n,
-  and x (as above). Returns list. k is a vector of the
-  number of sites in a collection of windows, and n is a
-  vector of counts or proportions for the two classes of
-  insertion}
+  \item{cutpt.tail.expr}{R call (or variable naming a call)
+  with (optional) vars: k,n, and x (as above). Returns
+  list. k is a vector of the number of sites in a
+  collection of windows, and n is a vector of counts or
+  proportions for the two classes of insertion. If not
+  supplied, \code{critVal.target(k,n,target=5,posdiff=x)}
+  is used.}
 
   \item{tmp.env}{(optional) environment to use in
   evaluation of cutpt.* expressions. This is usually needed
@@ -48,7 +54,6 @@
   cluster integration sites
 }
 \examples{
-
 # examples invoking gRxCluster
 
 x.seqnames <- rep(letters[1:3],each=50)

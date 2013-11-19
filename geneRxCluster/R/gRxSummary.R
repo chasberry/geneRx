@@ -1,4 +1,3 @@
-
 ##' Summarize gRxCluster Results
 ##'
 ##' Get the FDR and related data for a run of gRxCluster. By selecting

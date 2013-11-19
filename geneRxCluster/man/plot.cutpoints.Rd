@@ -15,15 +15,16 @@
   \item{...}{passed to barplot}
 }
 \value{
-  list with components of \dQuote{bar.x} (the value of
-  \code{hist()}), \dQuote{kvals} (window widths plotted),
-  and \dQuote{pi.0} (the input vlue of \code{pi.0}
+  list with components of \dQuote{\code{bar.x}} (the value
+  of \code{hist()}), \dQuote{\code{kvals}} (window widths
+  plotted), and \dQuote{\code{pi.0}} (the input value of
+  \code{pi.0})
 }
 \description{
-  Plot a set of cutpoints
+  Plot a set of cutpoints - Utility
 }
 \details{
-  not for users. not exported
+  NOT FOR USERS. Not exported.
 }
 \author{
   Charles Berry

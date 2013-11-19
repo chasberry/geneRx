@@ -25,6 +25,21 @@
   This version uses power and TFD and will limit windows
   screened
 }
+\examples{
+# symmetric odds:
+crit <-
+    critVal.power(5:25,c(1,1),5,pwr=0.8,odds=7)
+crit[[1]]
+sapply(crit,c)
+# 5:1 odds
+asymmetric.crit <-
+    critVal.power(5:25,c(1,5),5,pwr=0.8,odds=7)
+# show the critical regions
+par(mfrow=c(1,2))
+gRxPlot(crit,method="critical")
+gRxPlot(asymmetric.crit,method="critical")
+rm(crit,asymmetric.crit)
+}
 \author{
   Charles Berry
 }

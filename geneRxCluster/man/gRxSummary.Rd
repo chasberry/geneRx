@@ -25,7 +25,6 @@
   value.
 }
 \examples{
-
 x.seqnames <- rep(letters[1:3],each=50)
 x.starts <- c(seq(1,length=50),seq(1,by=2,length=50),seq(1,by=3,length=50))
 x.lens <- rep(c(5,10,15,20,25),each=2)

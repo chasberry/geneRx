@@ -42,6 +42,18 @@
   only the critical regions are plotted or with
   \code{method="odds"} the log odds only are plotted.
 }
+\examples{
+x.seqnames <- rep(letters[1:3],each=500)
+x.starts <- c(seq(1,length=500),seq(1,by=2,length=500),seq(1,by=3,length=500))
+x.lens <- rep(c(5,10,15,20,25),each=20)
+x.group <- rep(rep(c(TRUE,FALSE),length=length(x.lens)),x.lens)
+## add a bit of fuzz:
+x.group <- 1==rbinom(length(x.group),1,pr=ifelse(x.group,.8,.2))
+x.kvals <- as.integer(sort(unique(x.lens)))
+x.res <- gRxCluster(x.seqnames,x.starts,x.group,x.kvals)
+gRxPlot(x.res)
+rm( x.seqnames, x.starts, x.lens, x.group, x.kvals, x.res)
+}
 \author{
   Charles Berry
 }

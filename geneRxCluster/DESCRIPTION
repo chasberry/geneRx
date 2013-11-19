@@ -1,11 +1,24 @@
 Package: geneRxCluster
-Date: 2013-09-12
-Version: 0.2-1
+Date: 2013-11-19
+Version: 0.99-0
 License: GPL (>= 2)
 Description: Detect Differential Clustering of Genomic Sites such as
-        gene therapy integrations
+    gene therapy integrations
 Title: gRx Differential Clustering
 Author: Charles Berry
 Maintainer: Charles Berry <ccberry@ucsd.edu>
-Depends: GenomicRanges,IRanges
-Suggests: RUnit, BiocGenerics
+biocViews: Sequencing, Bioinformatics, Clustering, Genetics
+Depends:
+    GenomicRanges,IRanges
+Suggests:
+    RUnit,
+    BiocGenerics
+Collate:
+    'Rutils.R'
+    'grx_clust_Call.R'
+    'dot-gRxCluster.R'
+    'gRxCluster.R'
+    'gRxPlot.R'
+    'gRxPlotClumps.R'
+    'gRxSummary.R'
+    'geneRxCluster-package.R'
