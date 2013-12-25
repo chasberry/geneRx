@@ -1,20 +1,7 @@
-% Created 2013-09-12 Thu 11:47
-\documentclass[11pt]{article}
-\usepackage[utf8]{inputenc}
-\usepackage[T1]{fontenc}
-\usepackage{fixltx2e}
-\usepackage{graphicx}
-\usepackage{longtable}
-\usepackage{float}
-\usepackage{wrapfig}
-\usepackage[normalem]{ulem}
-\usepackage{textcomp}
-\usepackage{marvosym}
-\usepackage{wasysym}
-\usepackage{amssymb}
-\usepackage{amstext}
+% Created 2013-12-24 Tue 10:20
+\documentclass{article}
 \usepackage{hyperref}
-\tolerance=1000
+
 %\VignetteIndexEntry{Using geneRxCluster}
 \author{Charles C. Berry}
 \date{\today}
@@ -22,7 +9,7 @@
 \hypersetup{
   pdfkeywords={},
   pdfsubject={},
-  pdfcreator={Emacs 24.3.1 (Org mode 8.1)}}
+  pdfcreator={Emacs 24.3.1 (Org mode 8.2.3c)}}
 \begin{document}
 
 \maketitle
@@ -32,7 +19,7 @@
 \section{Overview}
 \label{sec-1}
 
-The \verb~geneRxCluster~ package provides some function for exploring
+The \verb~geneRxCluster~ package provides some functions for exploring
 genomic insertion sites originating from two different
 sources. Possibly, the two sources are two different gene therapy
 vectors. In what follows, some simulations are used to create datasets
@@ -42,7 +29,7 @@ functions.
 \section{Basic Use}
 \label{sec-2}
 
-It might be helpful to look at these help pages brefly before getting
+It might be helpful to look at these help pages briefly before getting
 started:
 
 \begin{center}
@@ -170,8 +157,9 @@ and that the estimated False Discovery Rate was 0.68 is a bit less
 than 1.0, which we know to be the actual False Discovery
 Rate. However, this is well within the bounds of variation in a
 simulation like this. The last part of the printout shows the values
-of all the arguments used in the call to \verb~gRxCluster~ including two
-that were filled in by default, and which will be discussed later on.
+of all the arguments used in the call to \verb~gRxCluster~
+including two that were filled in by default, and which will be
+discussed later on.
 
 \subsection{Simulating Clumps}
 \label{sec-2-4}
@@ -419,5 +407,5 @@ and false discovery numbers are considered.
   2010.
 
 \end{thebibliography}
-% Emacs 24.3.1 (Org mode 8.1)
+% Emacs 24.3.1 (Org mode 8.2.3c)
 \end{document}

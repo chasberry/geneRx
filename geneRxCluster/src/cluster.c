@@ -70,7 +70,7 @@ void cutptApply(
       ct_ptr[j] = res;
     };
   };
-};
+}
 
 static inline void cutptClean_new_elt(int *pvj, int *ctj, int *pr_low, 
                                       int *pr_hi, int *ct_low, int *ct_hi, 
@@ -109,8 +109,7 @@ static inline void cutptClean_new_elt(int *pvj, int *ctj, int *pr_low,
       }
     }
   }
-};
-
+}  
 
 static inline void cutptClean_old_elt(int *pvj, int *ctj, int *pr_low, 
                                       int *pr_hi, int *ct_low, int *ct_hi, 
@@ -173,7 +172,7 @@ static inline void cutptClean_old_elt(int *pvj, int *ctj, int *pr_low,
   } else if (*ct_conflict)
     /* intra-k legacy - let prior and site be */
     (*ct_conflict)--;
-};
+}
 
 void cutptClean(
                 SEXP cutptFunRes, SEXP kcounts, SEXP ct, 
@@ -231,7 +230,7 @@ void cutptClean(
                           &cnt_hi,  &cnt_conflict, kvals_ptr[i]);
 
   };
-};
+}
 
    
  int depthFun(SEXP ct, int *depth, int *cid, int *chromoSts_ptr,
@@ -307,7 +306,6 @@ void best_val(
       for (int j = 0; j<strt_n; j++){
         int kcp = kcounts_ptr[j]; 
         if ( kcp != NA_INTEGER ){
-          double swb_tmp = swb[j];
           double fdr_low = ctpt_fdr[ kcp ];
           double fdr_up =  ctpt_fdr[ kcp + kvals_ptr[i] + 1 ];
           if (fdr_low<swb[j]) swb[j] = fdr_low;
@@ -322,7 +320,7 @@ void best_val(
   
     for (int i = 0; i<strt_n; i++)
       if (swb[i] < cbest[ cid[i] ]) cbest[ cid[i] ] = swb[i];
-  };
+  }
 
 // count the number of cluster/depth combos
 
@@ -341,7 +339,7 @@ int cd_count( SEXP depth_sexp, SEXP cluster_id, int strt_n)
   };
 
   return cdn;
-};
+}
     
 /* get summaries of clusters: 
  * start index, end index , depth, group 1, group 2
@@ -359,7 +357,7 @@ void clustsum(SEXP depth_sexp, SEXP cluster_id, SEXP grp,
   int *gr1 =         INTEGER(summary_matrix) + 4*cd_combo_n;
   
   int i_last = 0, cd_combo=-1;
-  int lastdepth = 0, newdepth, last_cid=0, ctab[2]={0,0}; 
+  int lastdepth = 0, last_cid=0, ctab[2]={0,0}; 
   for (int i = 0; i<strt_n; i++){
     if (cid[i] != 0) {
       if ( (lastdepth != depth[i]) ||
@@ -388,9 +386,9 @@ void clustsum(SEXP depth_sexp, SEXP cluster_id, SEXP grp,
   gr1[ cd_combo ] = ctab[1];
   cl_depth[ cd_combo ] = lastdepth;
   
-};
+}
 
-SEXP gRxC_cluster ( SEXP chromoSts, SEXP chromoEnds, SEXP strt, SEXP grp, SEXP kvals, SEXP cutptExprs, SEXP cutptFunExprs, SEXP tmpEnv, SEXP nperm ) {
+SEXP gRxC_cluster ( SEXP chromoSts, SEXP chromoEnds, SEXP strt, SEXP grp, SEXP kvals, SEXP cutptExprs, SEXP cutptFunExprs, SEXP tmpEnv, SEXP nperm, SEXP sample_id, SEXP sample_tab ) {
 
    /*
    * Based on this signature: 
@@ -402,7 +400,9 @@ SEXP gRxC_cluster ( SEXP chromoSts, SEXP chromoEnds, SEXP strt, SEXP grp, SEXP k
    *      cutptExprs="call",
    *      cutptFunExprs="call",
    *      tmpEnv="environment",
-   *      nperm="integer")  
+   *      nperm="integer",
+   *      sample_id="integer",
+   *      sample_tab="integer")  
    *   Note that chromoSts, chromoEnds, and strt originate at 1 not 0
    * 
    */
@@ -415,6 +415,8 @@ SEXP gRxC_cluster ( SEXP chromoSts, SEXP chromoEnds, SEXP strt, SEXP grp, SEXP k
  int *strt_ptr = INTEGER(strt);
  int *grp_ptr = INTEGER(grp);
  int *kvals_ptr = INTEGER(kvals);
+ int *sample_tab_ptr = INTEGER(sample_tab);
+ int *sample_id_ptr = INTEGER(sample_id);
  
  /* nperms has length 1. Get the value: 
  */
@@ -424,10 +426,10 @@ SEXP gRxC_cluster ( SEXP chromoSts, SEXP chromoEnds, SEXP strt, SEXP grp, SEXP k
  /* get lengths of objects */
  
  int chromoSts_n = length( chromoSts );
- int chromoEnds_n = length( chromoEnds );
  int strt_n = length( strt );
  int grp_n = length( grp );
  int kvals_n = length( kvals );
+ int len_sample = length( sample_tab );
  
  
  /* SEXPs are setup here */
@@ -501,24 +503,11 @@ SEXP gRxC_cluster ( SEXP chromoSts, SEXP chromoEnds, SEXP strt, SEXP grp, SEXP k
  SEXP summary_matrix;
  
  //  PROTECT(summary_matrix = allocMatrix(INTSXP,cd_combo_n,5));
- /* tabulate the group */
- 
- int *int_ptr = grp_ptr;
- double ntab[2] = {0.0,0.0};
- for (int i = 0; i < grp_n; i++){
-   ntab[ *int_ptr ]++;
-   int_ptr++;
-  };
- 
- REAL(pr)[0] = ntab[1]/(ntab[0]+ntab[1]);
- REAL(n_table)[0] = ntab[0];REAL(n_table)[1] = ntab[1];
- 
  // Rprintf("enter rolling\n");
  /* sdiff is the start difference */
  
   for (int i = 0; i<kvals_n; i++){
      int k = kvals_ptr[i];
-     double xinit=0.0;
      int l = i*strt_n+k-1;
      /* rolling difference of k starts */
      for (int j=k-1; j < strt_n; j++){
@@ -581,21 +570,46 @@ SEXP gRxC_cluster ( SEXP chromoSts, SEXP chromoEnds, SEXP strt, SEXP grp, SEXP k
   };
  
  // Rprintf("enter permute\n");
- 
+   
  for (int iperm = perm_n; iperm >= 0; iperm--){
-   R_CheckUserInterrupt();
-   if (iperm==0) // last time thru, use grp_orig 
-     copyVector( grp, grp_orig );
-   else 
-     {
-       /* sample grp, then run it all */
-   
-       GetRNGstate();
-       for (int i=0; i<grp_n; i++) REAL(grp_urand)[i] = unif_rand();
-       PutRNGstate();
-   
-       rsort_with_index( REAL(grp_urand), grp_ptr, grp_n);
-     }
+    R_CheckUserInterrupt();
+    if (iperm==0) // last time thru, use grp_orig 
+      copyVector( grp, grp_orig );
+    else 
+      { // check if sample ids are tabled
+        if (len_sample>0) {
+          GetRNGstate();
+          for (int i=0; i<len_sample; i++) REAL(grp_urand)[i] = unif_rand();
+          PutRNGstate();
+          
+          rsort_with_index( REAL(grp_urand), sample_tab_ptr, len_sample);
+          
+          for (int i=0; i<grp_n; i++) grp_ptr[i] = sample_tab_ptr[ sample_id_ptr[ i ]];
+ 
+   }
+        else
+          {
+            /* permute all sites in grp */
+            
+            GetRNGstate();
+            for (int i=0; i<grp_n; i++) REAL(grp_urand)[i] = unif_rand();
+            PutRNGstate();
+        
+            rsort_with_index( REAL(grp_urand), grp_ptr, grp_n);
+          }
+      }
+  
+ /* tabulate the group */
+ 
+ int *int_ptr = grp_ptr;
+ double ntab[2] = {0.0,0.0};
+ for (int i = 0; i < grp_n; i++){
+   ntab[ *int_ptr ]++;
+   int_ptr++;
+  };
+ 
+ REAL(pr)[0] = ntab[1]/(ntab[0]+ntab[1]);
+ REAL(n_table)[0] = ntab[0];REAL(n_table)[1] = ntab[1];
  
  // Rprintf("enter counts\n");
  kval_counts(  kcounts,  sdiff, 

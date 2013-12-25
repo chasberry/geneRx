@@ -1,14 +1,13 @@
 citHeader("To cite package `geneRxCluster' in publications use:")
-
-citEntry(entry = "Article",
+citEntry(entry = "techreport",
     title =        "Comparing {DNA} site clusters with {S}can {S}tatistics",  
          author = personList(as.person("Charles C. Berry"),
                              as.person("Karen Ocwieja"),
                              as.person("Nirvav Malani"),
                              as.person("Frederic D. Bushman")),
-         journal =      "In Review",
+         institution="UC San Diego",
          year = 2013,
          textVersion =
          paste0("Berry CC, Ocwieja K, Malani N and Bushman FD (2013).",
                 "Comparing DNA site clusters with Scan Statistics.",
-                "_In Review_"))
+                "Technical Report"))

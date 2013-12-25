@@ -16,7 +16,8 @@ res <- callCl(chromoSts=c(1L,11L), chromoEnds=c(10L,20L), strt=as.integer(1:20),
               cutptFunExprs=
               list(structure(as.integer(c(3,8)),
                              fdr=cbind(low=(0:10)/10,up=(10:0)/10))) ,
-              tmpEnv=new.env(), nperm=0L) 
+              tmpEnv=new.env(), nperm=0L,
+              integer(0),integer(0)) 
 
 names(res) <-
               c("kcounts", "ct", "cutptFunRes", "depth", "cluster_id",
@@ -56,3 +57,36 @@ test_bad_args_gRxCluster <- function(){
                    kvals=10L:30L, cutptExprs=rep(Inf,1)),
         "arg lengths not equal")
 }
+
+test_permutation_both_ways_gRxCluster <- function(){
+        seqnm <- as.integer(rep(1:5,each=200))
+        st1 <- sort(sample(10000,1000))
+        al1 <- rbinom(1000,1,0.5)
+        al1[50:75] <- 1L
+        sample.id <- seq_along(al1)-1
+        sample.tab <- al1
+        set.seed(12345)
+
+        res4 <-
+            gRxCluster(
+                as.integer(seqnm),
+                as.integer(st1),
+                as.integer(al1),
+                as.integer(c(15:16)),
+                nperm=20L,
+                sample.id=as.integer(sample.id+1),
+                sample.tab=as.integer(sample.tab))
+                set.seed(12345)
+
+        set.seed(12345)
+        res5 <-
+            gRxCluster(
+                as.integer(seqnm),
+                as.integer(st1),
+                as.integer(al1),
+                as.integer(c(15:16)),
+                nperm=20L)
+
+        checkEquals(metadata(res4)$perm_cluster_best,
+                    metadata(res4)$perm_cluster_best)
+    }
