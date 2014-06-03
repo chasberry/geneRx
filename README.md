@@ -3,8 +3,17 @@ geneRx
 
 Tools for Data on Revtroviral Vectors as used in gene therapy  
 
+# Installing
 
-The files found here are:
+`geneRxCluster` is on Bioconductor. The easiest (and usually best)
+method to install it is to issue these commands in your `R` session:
+
+    source("http://bioconductor.org/biocLite.R")
+    biocLite("geneRxCluster")
+
+# Files in this repo
+
+The files found here are possibly out of date. They follow this format:
 
 -   **geneRxCluster:** development version of the geneRxCluster R package
 
@@ -18,12 +27,12 @@ The files found here are:
     binary installation
 
 The package requires the GenomicRanges and IRanges bioConductor
-packages. To install them, issue these commands in R
+packages. To install them, issue the commands in Installing and they
+will automatically be installed. For manual installations, issues
+these commands in R
 
-<div class="verbatim">
-   source("http://bioconductor.org/biocLite.R")
-</div>
-<div class="verbatim">
-   biocLite("GenomicRanges")
-</div>
+
+    source("http://bioconductor.org/biocLite.R")
+    biocLite("GenomicRanges")
+
 
