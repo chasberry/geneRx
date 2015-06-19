@@ -1,0 +1,7320 @@
+#+STARTUP: hideblocks
+
+* Commentary
+
+What truly matters is referenced in [[make steps]], so look there first.
+
+Note: This file is actually a subset of my working file and will not
+get updated regularly. It may contain deprecated org idioms.
+
+Some of what you will see is stuff I used to work thru the coding. I
+have left that alone. src blocks that are tangled or are referenced in
+noweb chunks of blocks that get tangled eventually show up in the
+package.
+
+* geneRxCluster package
+
+** make steps
+
+- Run the src_block in [[create package src and R]]
+- Edit the [[description-tbl][DESCRIPTION table]] then run the [[description-src-block]]
+- Possibly edit the [[citation-grx]] citation citEntry args
+- Go the the [[vignette]] subtree make any needed edits and type "C-c C-e
+  C-s l r" to renew the vignette
+- Go to [[write user funs to package]] and type C-c C-v C-s to run the src-blocks there
+- start a shell and
+  - cd  <here>
+  - R CMD build --compact-vignettes geneRxCluster
+  - cd /Users/cberry/projects/R/R-devel
+  - R CMD check  `ls -t <here>/geneRxCluster*tar.gz | head -1`
+- if that passes then R CMD INSTALL  <here>/geneRxCluster*tar.gz
+
+** C-codes
+    :PROPERTIES:
+    :EXPORT_FILE_NAME: revision.c
+    :EXPORT_OPTIONS: toc:nil
+    :END:
+    
+#+NAME: grx-headers
+#+BEGIN_SRC c
+  #include <Rmath.h>
+  #include <R_ext/Utils.h>
+#+END_SRC
+
+*** otherdef headers
+
+**** headers
+
+#+NAME: grx-misc-headers
+#+begin_src c
+  
+  /* marks for window counts */
+  
+  #define NOTAIL 0
+  #define HITAIL 1
+  #define LOWTAIL -1
+  #define HIOUT 2
+  #define LOWOUT -2
+  #define CONFLICT 9
+  
+#+end_src
+
+
+**** kval counts
+
+#+NAME: grx-kval-counts-fun
+#+BEGIN_SRC c
+  void kval_counts( SEXP kcounts, SEXP sdiff, 
+                    /* all the usual vars are added */
+                    int *grp_ptr, int *kvals_ptr,
+                    int strt_n,  int kvals_n)
+    {
+      int *sdiff_ptr = INTEGER( sdiff );
+      int *kcounts_ptr = INTEGER( kcounts );
+      
+      for(int i = 0; i<kvals_n; i++){
+        int k = kvals_ptr[i];
+        int count=0;
+        for(int j=0; j<k-1; j++){
+          count+= grp_ptr[ j ];
+          kcounts_ptr[ j + i*strt_n ]=NA_INTEGER;
+        };
+        for(int j=k-1; j<strt_n; j++){
+          count+= grp_ptr[ j ];
+          kcounts_ptr[ j + i*strt_n ] = 
+            (sdiff_ptr[ j + i*strt_n] == NA_INTEGER) ? NA_INTEGER : count;
+          count-= grp_ptr[j-k+1];
+        };
+      };
+    }
+   
+#+END_SRC
+
+
+**** cutpts
+Look up tail for each window for one value of k - then classify sites:
+1. site is in window(s) in lower tail
+2. site is in window(s) in upper tail
+3. site is never in a tail or is claimed by at least one window in
+   each tail
+
+Then compare across k and let the lower value rule if there are conflicts.
+
+Where to do cross-k compares? Maybe at start and mark conflicts with
+an explicit flag before doing intra-k compares?
+
+Assume leading elt's of kcounts[,i] has rep(NA,kvals_ptr[i]-1) 
+
+This is getting very ungainly.
+
+
+#+NAME: grx-cutpt-fun
+#+BEGIN_SRC c
+  
+  void cutptApply(
+                  SEXP cutptFunRes, SEXP kcounts, SEXP ct, 
+                  int *kvals_ptr, int strt_n, int kvals_n)
+  {
+  
+    
+    for (int i = 0; i < kvals_n; i++){
+      /* Rprintf("k=%d\\n",kvals_ptr[i]); */
+      int k_low = REAL(AS_NUMERIC(VECTOR_ELT(cutptFunRes,i)))[0];
+      int k_hi = REAL(AS_NUMERIC(VECTOR_ELT(cutptFunRes,i)))[1];
+      for (int j = 0; j < strt_n; j++){
+        int res; 
+        int *kcounts_ptr = INTEGER(kcounts)+i*strt_n;
+        int *ct_ptr = INTEGER(ct)+i*strt_n;
+        if (kcounts_ptr[j]==NA_INTEGER)
+          res = NOTAIL;
+        else {
+          if (kcounts_ptr[j] < k_low) 
+            res = LOWTAIL;
+          else 
+            if (kcounts_ptr[j] >= k_hi)
+              res = HITAIL;
+            else
+              res = NOTAIL;
+        };
+        ct_ptr[j] = res;
+      };
+    };
+  }
+  
+#+END_SRC
+
+
+Need to add call of this fun:
+
+#+NAME: grx-cutpt-clean-fun
+#+BEGIN_SRC c
+  static inline void cutptClean_new_elt(int *pvj, int *ctj, int *pr_low, 
+                                        int *pr_hi, int *ct_low, int *ct_hi, 
+                                        int *ct_conflict, int kv){
+    /* here pvj, ctj reference new elt */
+    /* entry prior value */
+    if (*pvj!=NOTAIL)
+      if (*pvj==LOWTAIL)
+        (*pr_low)++;
+      else if (*pvj==HITAIL)
+        (*pr_hi)++;
+      else if (*pvj==CONFLICT){
+        (*pr_low)++;
+        (*pr_hi)++;
+      }
+  
+      /* entry window */
+    /* ct_confict is incremented sites in entering window */
+    if (*ctj!=NOTAIL){
+      if (*ctj==HITAIL){ 
+        (*ct_hi)++;
+        if (*ct_low){
+          ,*ct_conflict=kv;
+        }
+        else if (*pr_low) {
+          ,*ctj=HIOUT;
+        }
+      }
+      else {
+        (*ct_low)++;
+        if (*ct_hi){
+          ,*ct_conflict=kv;
+        }
+        else if (*pr_hi){ 
+          ,*ctj=LOWOUT;
+        }
+      }
+    }
+  }  
+  
+  static inline void cutptClean_old_elt(int *pvj, int *ctj, int *pr_low, 
+                                        int *pr_hi, int *ct_low, int *ct_hi, 
+                                        int *ct_conflict, int kv){
+    /* here pvj, ctj reference old elt */
+  
+    if (*pvj!=NOTAIL){ 
+      if (*pvj==CONFLICT){
+        (*pr_hi)--;
+        (*pr_low)--;
+      }
+      else if (*pvj==HITAIL)
+        (*pr_hi)--;
+      else if (*pvj==LOWTAIL)
+        (*pr_low)--;
+    }
+    
+  
+    int cv = *ctj;
+  
+    if (*ct_hi && *ct_low){ /* intra-k conflict - possibly alter prior */
+      ,*ctj=NOTAIL;
+      if (*pvj==NOTAIL) *pvj=CONFLICT;
+      if (cv==HITAIL||cv==HIOUT){
+        (*ct_hi)--;
+        (*ct_conflict)--;
+      }
+      else if (cv==LOWTAIL||cv==LOWOUT){
+        (*ct_low)--;
+        (*ct_conflict)--;
+      }
+    }
+    else if (cv!=NOTAIL){ 
+      if (*ct_conflict){ /* intra-k legacy - let prior be */
+        (*ct_conflict)--;
+        ,*ctj=NOTAIL;
+        if (cv==HITAIL||cv==HIOUT)
+          (*ct_hi)--;
+        else
+          (*ct_low)--;
+      }
+      else if (cv==HIOUT||cv==LOWOUT){ /* prior already marked */
+        ,*ctj=NOTAIL;
+        if (cv==HIOUT)
+          (*ct_hi)--;
+        else
+          (*ct_low)--;
+      } 
+      else { /* unconflicted window - copy to prior and backfill */ 
+        ,*pvj=cv;
+        for (int j=1;j<kv && (pvj[-j]==NOTAIL||pvj[-j]==cv);j++){
+          pvj[-j]=cv;
+          ctj[-j]=cv;
+        }
+        if (cv==HITAIL)
+          (*ct_hi)--;
+        else
+          (*ct_low)--;
+      }
+    } else if (*ct_conflict)
+      /* intra-k legacy - let prior and site be */
+      (*ct_conflict)--;
+  }
+  
+  void cutptClean(
+                  SEXP cutptFunRes, SEXP kcounts, SEXP ct, 
+                  int *kvals_ptr, int strt_n, int kvals_n, 
+                  int *prior_value)
+  {
+  
+    /* At this point ct has the tail flag for each window.  */
+    /* Now it will be converted to the flag for each site.  */
+    /* Look up tail for each window for one value of k - then classify sites: */
+    /* 1. site is in window(s) in lower tail */
+    /* 2. site is in window(s) in upper tail */
+    /* 3. site is never in a tail or is claimed by at least one window in */
+    /*    each tail */
+    
+    for (int i = 0; i<strt_n; i++) prior_value[i]=0;
+    
+    /* Accumulate cnt_hi, prev_hi, cnt_low, prev_low on entry; decrement
+       on exit. conflict=(cnt_hi+prev_hi)&&(cnt_low+prev_low)
+       if conflict, neuter left elt and no backfill else backfill.
+       Update prior_value with backfilling. 
+       (rethink if no checking is needed and if intra-k corrections are
+       needed first)
+    ,*/
+  
+    for (int i = 0; i<kvals_n; i++){
+      /* Rprintf("k=%d",kvals_ptr[i]); */
+      
+      /* initialize for this k */
+      int cnt_hi=0, prev_hi=0, cnt_low=0, prev_low=0, 
+        cnt_conflict=0;
+  
+      int *ct_ptr = INTEGER(ct)+i*strt_n;
+      int kv_offset = kvals_ptr[i]-1;
+  
+      for (int j = 0; j<kv_offset; j++)
+        cutptClean_new_elt( prior_value+j, ct_ptr+j, &prev_low, 
+                            &prev_hi, &cnt_low,  &cnt_hi,  
+                            &cnt_conflict, kvals_ptr[i]);
+      
+      
+      for (int j = kv_offset; j<strt_n; j++){
+        cutptClean_new_elt( prior_value+j, ct_ptr+j, &prev_low, 
+                            &prev_hi, &cnt_low,  &cnt_hi,  
+                            &cnt_conflict, kvals_ptr[i]);
+        cutptClean_old_elt( prior_value+j-kv_offset, ct_ptr+j-kv_offset, 
+                            &prev_low, &prev_hi, &cnt_low,  
+                            &cnt_hi,  &cnt_conflict, kvals_ptr[i]);
+      };
+  
+      /* clear out final kvals_ptr[i] windows */
+      for (int j = strt_n-kv_offset; j<strt_n; j++)
+        cutptClean_old_elt( prior_value+j, ct_ptr+j, 
+                            &prev_low, &prev_hi, &cnt_low,  
+                            &cnt_hi,  &cnt_conflict, kvals_ptr[i]);
+  
+    };
+  }
+  
+#+END_SRC
+
+
+**** depth 
+
+#+NAME: grx-depth-fun
+#+BEGIN_SRC c
+     
+   int depthFun(SEXP ct, int *depth, int *cid, int *chromoSts_ptr,
+                int *chromoEnds_ptr, int strt_n, int kvals_n, int chromoSts_n)
+  
+  {
+     
+     int cid_n=0;
+     
+     for (int i = 0; i<strt_n; i++) depth[i]=0;
+     
+     for (int i = 0; i<kvals_n; i++){
+       int *ct_ptr = INTEGER(ct)+i*strt_n;
+       for (int j = 0; j<strt_n; j++) depth[j] += ct_ptr[j];
+     };
+     
+     /* cluster ID 
+      ,* use sequential numbers for clusters
+      ,* use zero for unassigned sites
+      ,*/
+     
+     for (int m=0; m<chromoSts_n; m++){  
+       int lastdepth = 0;
+     
+       for (int i=chromoSts_ptr[m]-1; i<chromoEnds_ptr[m]; i++){
+         if (depth[i] == 0){
+           cid[i]=0;
+           lastdepth = 0;}
+         else 
+           {
+             if (lastdepth * depth[i] <= 0 )
+               cid_n++;
+             lastdepth = depth[i];
+             cid[i]=cid_n;
+           }
+       }
+     }
+     return cid_n;
+  }
+  
+#+END_SRC
+
+
+
+**** best FDR
+
+
+#+NAME: grx-minval-fun
+#+BEGIN_SRC c
+  /* get best nominal alpha 
+   ,* for each position, 
+   ,* then for each cluster 
+   ,*/
+  
+  void best_val( 
+                SEXP sitewise_best,
+                SEXP cluster_best,
+                SEXP cutptFunRes,
+                SEXP kcounts,
+                int *kvals_ptr,
+                int *cid,
+                int cid_n,
+                int strt_n,
+                int kvals_n)
+  {
+    
+      double *swb = REAL(sitewise_best);
+      for (int i = 0; i<strt_n; i++) swb[i]=R_PosInf;
+    
+      for (int i = 0; i<kvals_n; i++){
+    
+        double *ctpt_fdr = 
+          REAL( getAttrib( VECTOR_ELT( cutptFunRes,i) , install("fdr")));
+    
+        int *kcounts_ptr = INTEGER(kcounts) + i*strt_n ;
+      
+        /* recall that ctpt_fdr has 
+         ,* kvals_ptr[i]+1 rows  
+         ,* whose indices are 0:kvals_n[i]
+         ,*/
+        
+        for (int j = 0; j<strt_n; j++){
+          int kcp = kcounts_ptr[j]; 
+          if ( kcp != NA_INTEGER ){
+            double fdr_low = ctpt_fdr[ kcp ];
+            double fdr_up =  ctpt_fdr[ kcp + kvals_ptr[i] + 1 ];
+            if (fdr_low<swb[j]) swb[j] = fdr_low;
+            if (fdr_up<swb[j]) swb[j] = fdr_up;
+          };
+        };
+      };
+      
+      double *cbest = REAL(cluster_best);
+     
+      for (int i=0; i <= cid_n; i++) cbest[i]=R_PosInf;
+    
+      for (int i = 0; i<strt_n; i++)
+        if (swb[i] < cbest[ cid[i] ]) cbest[ cid[i] ] = swb[i];
+    }
+#+END_SRC
+
+
+**** cluster summaries
+
+#+NAME: grx-summary-fun
+#+BEGIN_SRC c
+  
+  // count the number of cluster/depth combos
+  
+  int cd_count( SEXP depth_sexp, SEXP cluster_id, int strt_n)
+  {
+    int cdn=0,lastd=0,lastc=0;
+    for (int i = 0; i<strt_n; i++){
+      int cid = INTEGER(cluster_id)[i];
+      if (( cid !=0 ) &&
+          ((lastd != INTEGER(depth_sexp)[i] ) ||   
+           (lastc != cid))){
+        cdn++;
+        lastd = INTEGER(depth_sexp)[i];
+        lastc = cid;
+      };
+    };
+  
+    return cdn;
+  }
+      
+  /* get summaries of clusters: 
+   ,* start index, end index , depth, group 1, group 2
+   ,*/
+  
+  void clustsum(SEXP depth_sexp, SEXP cluster_id, SEXP grp,
+                SEXP summary_matrix, int cd_combo_n, int strt_n)
+  {
+    int *depth=INTEGER(depth_sexp), *cid = INTEGER(cluster_id), *grp_ptr=INTEGER(grp);
+    // columns of results matrix:
+    int *start_index = INTEGER(summary_matrix);
+    int *end_index =   INTEGER(summary_matrix) +   cd_combo_n;
+    int *cl_depth =    INTEGER(summary_matrix) + 2*cd_combo_n;
+    int *gr0 =         INTEGER(summary_matrix) + 3*cd_combo_n;
+    int *gr1 =         INTEGER(summary_matrix) + 4*cd_combo_n;
+    
+    int i_last = 0, cd_combo=-1;
+    int lastdepth = 0, last_cid=0, ctab[2]={0,0}; 
+    for (int i = 0; i<strt_n; i++){
+      if (cid[i] != 0) {
+        if ( (lastdepth != depth[i]) ||
+             (last_cid != cid[i])){ 
+          /* finalize last cluster 
+             initialize for current cluster
+          ,*/
+          if (cd_combo > -1){
+            end_index[ cd_combo ] = i_last+1; // 1 based index
+            gr0[ cd_combo ] = ctab[0];
+            gr1[ cd_combo ] = ctab[1];
+            cl_depth[ cd_combo ] = depth[i_last];
+          };
+          cd_combo++;
+          start_index[ cd_combo ] = i+1;
+          last_cid = cid[i];
+          lastdepth = depth[i];
+          ctab[0] = ctab[1] = 0;
+        };
+        i_last = i; 
+        ctab[ grp_ptr[i] ]++;
+      };
+    };
+    end_index[ cd_combo ] = i_last+1; // 1 based index
+    gr0[ cd_combo ] = ctab[0];
+    gr1[ cd_combo ] = ctab[1];
+    cl_depth[ cd_combo ] = lastdepth;
+    
+  }
+  
+#+END_SRC
+
+    
+*** body
+
+put the n_table calc inside the permutation loop if sample.id perms are used.
+
+#+NAME: grx-inputs
+#+BEGIN_SRC c
+    /*
+    ,* Based on this signature: 
+    ,* signature(chromoSts="integer",
+    ,*     chromoEnds="integer",
+    ,*      strt="integer",
+    ,*      grp="integer",
+    ,*      kvals="integer",
+    ,*      cutptExprs="call",
+    ,*      cutptFunExprs="call",
+    ,*      tmpEnv="environment",
+    ,*      nperm="integer",
+    ,*      sample_id="integer",
+    ,*      sample_tab="integer")  
+    ,*   Note that chromoSts, chromoEnds, and strt originate at 1 not 0
+    ,* 
+    ,*/
+  
+  /* set up ptrs */ 
+  
+  
+  int *chromoSts_ptr = INTEGER(chromoSts);
+  int *chromoEnds_ptr = INTEGER(chromoEnds);
+  int *strt_ptr = INTEGER(strt);
+  int *grp_ptr = INTEGER(grp);
+  int *kvals_ptr = INTEGER(kvals);
+  int *sample_tab_ptr = INTEGER(sample_tab);
+  int *sample_id_ptr = INTEGER(sample_id);
+  
+  /* nperms has length 1. Get the value: 
+  ,*/
+  
+  int perm_n = INTEGER( nperm )[ 0 ];
+  
+  /* get lengths of objects */
+  
+  int chromoSts_n = length( chromoSts );
+  int strt_n = length( strt );
+  int grp_n = length( grp );
+  int kvals_n = length( kvals );
+  int len_sample = length( sample_tab );
+  
+#+END_SRC
+
+
+#+NAME: grx-new-sexps
+#+BEGIN_SRC c
+  
+  /* SEXPs are setup here */
+  
+  /* SEXPs that can be PROTECTed at onset */
+  /* ------------------------------------ */
+  
+  int nprotect=0;
+  
+  SEXP grp_orig;
+  PROTECT( grp_orig = duplicate( grp ));nprotect++;
+  
+  SEXP grp_urand;
+  PROTECT( grp_urand = allocVector(REALSXP, grp_n));nprotect++;
+  
+  SEXP pr, n_table;
+  PROTECT(pr = allocVector(REALSXP,1));nprotect++;
+  PROTECT(n_table = allocVector(REALSXP,2));nprotect++;
+  
+  SEXP sdiff; 
+  PROTECT( sdiff = allocMatrix( INTSXP, strt_n, kvals_n ));nprotect++;
+  int *sdiff_ptr = INTEGER( sdiff );
+  
+  SEXP kcounts;
+  PROTECT( kcounts = allocMatrix(INTSXP, strt_n, kvals_n));nprotect++;
+  
+  SEXP ct;
+  PROTECT( ct = allocMatrix(INTSXP, strt_n, kvals_n));nprotect++;
+  
+  // share the storge here:
+  SEXP prior_value_sexp;
+  PROTECT( prior_value_sexp = allocVector(INTSXP , strt_n ));nprotect++;
+  int *prior_value = INTEGER(prior_value_sexp);
+  SEXP depth_sexp = prior_value_sexp;
+  int *depth = INTEGER(depth_sexp);
+  
+  
+  SEXP cluster_id, cluster_best_list;
+  PROTECT( cluster_id = allocVector(INTSXP,strt_n));nprotect++;
+  PROTECT( cluster_best_list = allocVector(VECSXP,perm_n+1));nprotect++;
+  int *cid = INTEGER(cluster_id);
+  
+  SEXP sitewise_best;
+  PROTECT( sitewise_best = allocVector(REALSXP, strt_n));nprotect++;
+  
+  SEXP summary_matrix_list;
+  PROTECT( summary_matrix_list = allocVector(VECSXP,perm_n+1));nprotect++;
+  
+  
+   /* SEXPs that must be PROTECTed later */
+  /* ----------------------------------- */
+  
+
+  SEXP final;
+
+  // PROTECT(final = allocVector(VECSXP, 8 ));nprotect++;
+  
+
+  SEXP cutptSdiff;
+  
+  //  PROTECT(cutptSdiff = eval( cutptExprs, tmpEnv ));nprotect++;
+  
+  SEXP cutptFunRes;
+    
+  //  PROTECT(cutptFunRes = eval( cutptFunExprs, tmpEnv ));nprotect++;
+  
+  SEXP cluster_best;
+  
+  //  PROTECT( cluster_best = allocVector(REALSXP, 1+cid_n));
+  
+  SEXP summary_matrix;
+  
+  //  PROTECT(summary_matrix = allocMatrix(INTSXP,cd_combo_n,5));
+#+END_SRC
+
+
+#+NAME: grx-tab-group
+#+BEGIN_SRC c
+  /* tabulate the group */
+  
+  int *int_ptr = grp_ptr;
+  double ntab[2] = {0.0,0.0};
+  for (int i = 0; i < grp_n; i++){
+    ntab[ *int_ptr ]++;
+    int_ptr++;
+   };
+  
+  REAL(pr)[0] = ntab[1]/(ntab[0]+ntab[1]);
+  REAL(n_table)[0] = ntab[0];REAL(n_table)[1] = ntab[1];
+  
+#+END_SRC
+
+
+#+NAME: grx-rolling-diff
+#+BEGIN_SRC c
+  /* sdiff is the start difference */
+  
+   for (int i = 0; i<kvals_n; i++){
+      int k = kvals_ptr[i];
+      int l = i*strt_n+k-1;
+      /* rolling difference of k starts */
+      for (int j=k-1; j < strt_n; j++){
+        sdiff_ptr[l] = strt_ptr[j]-strt_ptr[j-k+1];
+        l++;
+      };
+      /* omit first k-1 values on each chromo by setting NAs */
+      for (int m=0; m<chromoSts_n; m++){
+        int max_end = imin2( chromoEnds_ptr[m], chromoSts_ptr[m] + k - 2);
+        for (int j=chromoSts_ptr[m]-1; j < max_end; j++) 
+          sdiff_ptr[j+strt_n*i] = NA_INTEGER;
+      }
+    };
+#+END_SRC
+
+
+#+NAME: grx-block-broken-ties
+#+BEGIN_SRC c
+  
+  for (int i = 0; i<kvals_n; i++){
+    int k = kvals_ptr[i];
+    /* omit k length groups that only include some position ties */
+    for (int m=0; m<chromoSts_n; m++){
+      int max_end = chromoEnds_ptr[m];
+      for (int j=chromoSts_ptr[m]-1+k; j < max_end; j++){
+        if (strt_ptr[j-1]==strt_ptr[j]) {
+          sdiff_ptr[j-1+strt_n*i] = NA_INTEGER;
+        };
+        if (strt_ptr[j-k]==strt_ptr[j-k+1]) 
+          sdiff_ptr[j+strt_n*i] = NA_INTEGER;
+      }
+    }
+   };
+  
+#+END_SRC
+
+#+NAME: grx-rolling-diff-check
+#+BEGIN_SRC c
+  for (int i = 0; i<kvals_n; i++){
+        int k = kvals_ptr[i];
+        for (int j =0; j<strt_n; j++)
+          if (sdiff_ptr[j+i*strt_n] < 0)
+            Rprintf("%d %d %d\\n",i,j,sdiff_ptr[j+i*strt_n]);
+   };
+          
+#+END_SRC
+
+
+#+NAME: grx-sdiff-cutpt
+#+BEGIN_SRC c
+  /* cutptExprs - is the expression to be used in setting up the
+     cutpoint for narrow intervals.
+  
+     tmpEnv - is an environment used for executing R commands
+  
+   ,*/
+  
+  if(!isEnvironment(tmpEnv))
+    error("tmpEnv should be an environment");
+  defineVar( install("x"), sdiff, tmpEnv );
+  
+  PROTECT(cutptSdiff = eval( cutptExprs, tmpEnv ));nprotect++;
+  int cutptSdiff_n = length( cutptSdiff );
+  
+  if (cutptSdiff_n != kvals_n)
+    error( "cutpt.filter.expr returned the wrong length");
+  
+  if (!isReal(cutptSdiff))
+    error("cutpt.filter.expr result must yield double");
+  
+  int l=0;
+  for (int i = 0; i<kvals_n; i++){
+    double cutat = REAL(cutptSdiff)[i];
+    for (int j=0; j<strt_n; j++){
+      if ( sdiff_ptr[l] != NA_INTEGER && (double) sdiff_ptr[l] > cutat ) 
+        sdiff_ptr[l] = NA_INTEGER;
+      l++;
+    };
+   };
+  
+#+END_SRC
+
+
+#+NAME: grx-permute-by-block
+#+BEGIN_SRC c 
+    
+  for (int iperm = perm_n; iperm >= 0; iperm--){
+     R_CheckUserInterrupt();
+     if (iperm==0) // last time thru, use grp_orig 
+       copyVector( grp, grp_orig );
+     else 
+       { // check if sample ids are tabled
+         if (len_sample>0) {
+           GetRNGstate();
+           for (int i=0; i<len_sample; i++) REAL(grp_urand)[i] = unif_rand();
+           PutRNGstate();
+           
+           rsort_with_index( REAL(grp_urand), sample_tab_ptr, len_sample);
+           
+           for (int i=0; i<grp_n; i++) grp_ptr[i] = sample_tab_ptr[ sample_id_ptr[ i ]];
+  
+    }
+         else
+           {
+             /* permute all sites in grp */
+             
+             GetRNGstate();
+             for (int i=0; i<grp_n; i++) REAL(grp_urand)[i] = unif_rand();
+             PutRNGstate();
+         
+             rsort_with_index( REAL(grp_urand), grp_ptr, grp_n);
+           }
+       }
+   
+#+END_SRC
+
+
+deprecated:
+#+NAME: grx-permute-grp
+#+BEGIN_SRC c
+  
+  for (int iperm = perm_n; iperm >= 0; iperm--){
+    R_CheckUserInterrupt();
+    if (iperm==0) // last time thru, use grp_orig 
+      copyVector( grp, grp_orig );
+    else 
+      {
+        /* sample grp, then run it all */
+    
+        GetRNGstate();
+        for (int i=0; i<grp_n; i++) REAL(grp_urand)[i] = unif_rand();
+        PutRNGstate();
+    
+        rsort_with_index( REAL(grp_urand), grp_ptr, grp_n);
+      }
+  
+#+END_SRC
+
+
+#+NAME: grx-kval-counts
+#+BEGIN_SRC c
+  kval_counts(  kcounts,  sdiff, 
+                /* all the usual vars are added */
+                grp_ptr, kvals_ptr, 
+                strt_n, kvals_n);
+  
+#+END_SRC
+#+NAME: grx-cutpt-call
+#+BEGIN_SRC c
+  /* cutptFunExprs - is the expression to be used in setting up the
+     cutpoint for kcounts.
+     
+     tmpEnv - is an environment used for executing R commands
+     
+  ,*/
+  
+  if(!isEnvironment(tmpEnv))
+    error("tmpEnv should be an environment");
+  defineVar( install("k"), kvals, tmpEnv );
+  defineVar( install("n"), n_table, tmpEnv );
+  
+  PROTECT(cutptFunRes = eval( cutptFunExprs, tmpEnv ));nprotect++;
+  
+  int cutptFunRes_n = length( cutptFunRes );
+  
+  if (cutptFunRes_n != kvals_n)
+    error( "cutptFunExprs returned the wrong length");
+  
+  /* use the cutpts to classify  kcounts */
+  /* resolve conflicts in favor of lesser k values */
+  
+  cutptApply(  cutptFunRes, kcounts, ct, kvals_ptr,
+               strt_n, kvals_n);
+  cutptClean(  cutptFunRes, kcounts, ct, kvals_ptr,
+               strt_n, kvals_n, prior_value);
+  
+#+END_SRC
+
+#+NAME: grx-depth-call
+#+BEGIN_SRC c
+    int cid_n = depthFun( ct, depth, cid, chromoSts_ptr, chromoEnds_ptr, strt_n, kvals_n, chromoSts_n);
+#+END_SRC
+
+#+NAME: grx-minval-call
+#+BEGIN_SRC c
+  /* get best nominal alpha for each position, then for each
+   ,* cluster */
+  
+  
+  /* need to protect/unprotect each time */
+  
+  PROTECT( cluster_best = allocVector(REALSXP, 1+cid_n)); // nprotect++;
+      
+  best_val( sitewise_best, cluster_best, cutptFunRes, kcounts, 
+            kvals_ptr, cid, cid_n, strt_n, kvals_n);
+  
+  SET_VECTOR_ELT(cluster_best_list, iperm, duplicate(cluster_best));
+  
+  UNPROTECT(1);
+#+END_SRC
+#+NAME: grx-summary-call
+#+BEGIN_SRC c
+  int cd_combo_n = cd_count( depth_sexp, cluster_id, strt_n); 
+  
+  PROTECT(summary_matrix = allocMatrix(INTSXP,cd_combo_n,5)); //nprotect++;
+  
+  if (cd_combo_n>0)
+    clustsum( depth_sexp, cluster_id, grp, summary_matrix, cd_combo_n, strt_n);
+  
+  SET_VECTOR_ELT( summary_matrix_list, iperm, duplicate(summary_matrix));
+  UNPROTECT(1);
+  
+#+END_SRC
+
+#+NAME: grx-unprotect
+#+BEGIN_SRC c
+  
+  /* end for (iperm = ... */
+  }
+  PROTECT(final = allocVector(VECSXP, 8 ));nprotect++;
+  SET_VECTOR_ELT(final,0,kcounts);
+  SET_VECTOR_ELT(final,1,ct);
+  SET_VECTOR_ELT(final,2,cutptFunRes);
+  SET_VECTOR_ELT(final,3,depth_sexp);
+  SET_VECTOR_ELT(final,4,cluster_id);
+  SET_VECTOR_ELT(final,5,sitewise_best);
+  SET_VECTOR_ELT(final,6,cluster_best_list);
+  SET_VECTOR_ELT(final,7,summary_matrix_list);
+  UNPROTECT(nprotect);
+  
+  return final ;
+#+END_SRC
+
+#+NAME: grx-unprotect-saveall
+#+BEGIN_SRC c
+    
+    /* end for (iperm = ... */
+    }
+  PROTECT(final = allocVector(VECSXP, 10L ));nprotect++;
+  SET_VECTOR_ELT(final,0,kcounts);
+  SET_VECTOR_ELT(final,1,ct);
+  SET_VECTOR_ELT(final,2,cutptFunRes);
+  SET_VECTOR_ELT(final,3,depth_sexp);
+  SET_VECTOR_ELT(final,4,cluster_id);
+  SET_VECTOR_ELT(final,5,sitewise_best);
+  SET_VECTOR_ELT(final,6,cluster_best_list);
+  SET_VECTOR_ELT(final,7,summary_matrix_list);
+  SET_VECTOR_ELT(final,8,sdiff);
+  SET_VECTOR_ELT(final,9,cutptSdiff);
+  UNPROTECT(nprotect);
+    
+  return final;
+
+#+END_SRC
+
+
+*** combined src blocks
+
+#+NAME: grx-includes
+#+BEGIN_SRC c
+<<grx-headers>>
+#+END_SRC
+
+#+NAME: grx-body
+#+BEGIN_SRC c
+  <<grx-inputs>>
+  <<grx-new-sexps>>
+  // Rprintf("enter rolling\\n");
+  <<grx-rolling-diff>>
+  // Rprintf("enter block-broken\\n");
+  <<grx-block-broken-ties>>
+  // Rprintf("enter sdiff\\n");
+  <<grx-sdiff-cutpt>>
+  // Rprintf("enter permute\\n");
+  <<grx-permute-by-block>>
+  <<grx-tab-group>>
+  // Rprintf("enter counts\\n");
+  <<grx-kval-counts>>
+  // Rprintf("enter cutpt\\n");
+  <<grx-cutpt-call>>
+  // Rprintf("enter depth\\n");
+  <<grx-depth-call>>
+  // Rprintf("enter miinval\\n");
+  <<grx-minval-call>>
+  // Rprintf("enter summary\\n");
+  <<grx-summary-call>>
+  <<grx-unprotect-saveall>>
+#+END_SRC
+
+#+NAME: grx-otherdefs
+#+BEGIN_SRC c
+<<grx-misc-headers>>
+<<grx-kval-counts-fun>>
+<<grx-cutpt-fun>>
+<<grx-cutpt-clean-fun>>
+<<grx-depth-fun>>
+<<grx-minval-fun>>
+<<grx-summary-fun>>
+#+END_SRC
+
+
+
+** R codes
+   :PROPERTIES:
+   :session:  *R*
+   :noweb:    yes
+   :results:  output
+   :END:
+
+*** baby steps
+
+**** print first 5 values
+
+#+NAME: R-printInputs 
+#+BEGIN_SRC R 
+  tmp_body <-
+    paste(
+      '
+  <<cl-input-ptrs>>',
+      '
+  <<cl-test-input>>',
+      collapse="\n")
+  
+  printInputs <-
+      cfunction(signature(chromoSts="integer",
+                          chromoEnds="integer",
+                          strt="integer",
+                          grp="integer",
+                          kvals="integer",
+                          ivec="integer"
+                          ),
+                tmp_body)
+#+END_SRC
+
+#+RESULTS: R-printInputs
+
+#+BEGIN_SRC R
+  res <- printInputs(as.integer(chr.starts),
+                     as.integer(chr.ends),
+                     as.integer(st1),
+                     as.integer(al1),
+                     as.integer(c(15,25,35,45,55)),
+                     as.integer(0:4))
+  
+#+END_SRC
+
+#+RESULTS:
+:            1        17412         4732            0           15
+:        17413        22563       109502            1           25
+:        22564        35622       145902            0           35
+:        35623        46119       249362            0           45
+:        46120        49021       257212            0           55
+
+     
+**** tabulate the group
+
+#+NAME: R-tab-group
+#+BEGIN_SRC R
+  
+   tmp_body <-
+      paste(
+        '
+    <<cl-input-ptrs>>',
+        '
+    <<cl-tab-group>>',
+        '
+  <<cl-unprotect>>',
+        'Rprintf("%8.1f %8.1f %8.5f\\n",ntab[0],ntab[1], REAL(pr)[0]);
+  return(n_table)\n;',
+        collapse="\n")
+  
+  test_tab_grp <-
+    cfunction(
+      signature(chromoSts="integer",
+                            chromoEnds="integer",
+                            strt="integer",
+                            grp="integer",
+                            kvals="integer"),
+
+      tmp_body) 
+  
+#+END_SRC
+
+#+RESULTS: R-tab-group
+
+
+#+BEGIN_SRC R
+  res <- test_tab_grp(as.integer(chr.starts),
+                     as.integer(chr.ends),
+                     as.integer(st1),
+                     as.integer(al1),
+                     as.integer(c(15,25,35,45,55)))
+                     
+#+END_SRC
+
+#+RESULTS:
+: 147294.0  40974.0  0.21764
+
+
+**** rolling diff of start
+
+#+NAME: R-sdiff
+#+BEGIN_SRC R
+  tmp_body <-
+      '
+   <<grx-inputs>>
+   <<grx-new-sexps>>
+   <<grx-tab-group>>
+   <<grx-rolling-diff>>
+   <<grx-block-broken-ties>>
+   UNPROTECT(nprotect);
+   return(sdiff);
+  '
+  test_rolling_diff <-
+      cfunction(
+          signature(chromoSts="integer",
+                    chromoEnds="integer",
+                    strt="integer",
+                    grp="integer",
+                    kvals="integer",
+                    nperm="integer"),
+          tmp_body,
+          includes =
+          '
+    <<grx-headers>>'
+          )
+  
+          
+#+END_SRC
+
+#+RESULTS: R-sdiff
+
+
+#+BEGIN_SRC R
+  trd <- test_rolling_diff(
+      as.integer(chr.starts),
+      as.integer(chr.ends),
+      as.integer(st1),
+      as.integer(al1),
+      as.integer(c(15:35,45,55,65,75)),
+      nperm=2L)
+  
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+0 15 658648 659270
+0 16 659270 662033
+0 17 662033 662704
+0 18 662704 663468
+0 19 663468 664212
+0 20 664212 664266
+0 21 664266 664266
+0 15 0 21
+0 22 664266 668789
+0 23 668789 677555
+0 24 677555 677752
+0 25 677752 681827
+0 26 681827 682936
+0 27 682936 683791
+0 28 683791 687244
+0 29 687244 687637
+0 30 687637 687782
+0 31 687782 687802
+0 32 687802 687829
+0 33 687829 688190
+0 34 688190 690006
+0 15 0 74
+0 15 0 98
+0 15 0 99
+0 15 0 115
+0 15 0 122
+0 15 0 198
+0 15 0 344
+0 15 0 365
+0 15 0 429
+0 15 0 439
+0 15 0 446
+0 15 0 464
+0 15 0 465
+0 15 0 474
+0 15 0 485
+0 15 0 504
+0 15 0 646
+0 15 0 655
+0 15 0 675
+0 15 0 693
+0 15 0 701
+0 15 0 773
+0 15 0 838
+0 15 0 845
+0 15 0 856
+0 15 0 863
+0 15 0 880
+0 15 0 889
+0 15 0 928
+0 15 0 954
+0 15 0 971
+0 15 0 988
+0 15 0 993
+0 15 0 997
+0 15 0 1001
+0 15 0 1003
+0 15 0 1008
+0 15 0 1065
+0 15 0 1157
+0 15 0 1235
+0 15 0 1238
+0 15 0 1239
+0 15 0 1248
+0 15 0 1254
+0 15 0 1263
+0 15 0 1432
+0 15 0 1434
+0 15 0 1438
+0 15 0 1465
+0 15 0 1466
+0 15 0 1530
+0 15 0 1545
+0 15 0 1575
+0 15 0 1681
+0 15 0 1755
+0 15 0 1767
+0 15 0 1799
+0 15 0 1830
+0 15 0 1860
+0 15 0 1919
+0 15 0 1925
+0 15 0 2357
+0 15 0 2358
+0 15 0 2550
+0 15 0 2600
+0 15 0 2823
+0 15 0 3047
+0 15 0 3136
+0 15 0 3321
+0 15 0 3333
+0 15 0 3488
+0 15 0 3666
+0 15 0 3808
+0 15 0 4751
+0 15 0 4816
+0 15 0 4826
+0 15 0 4830
+0 15 0 4993
+0 15 0 5032
+0 15 0 5037
+0 15 0 5129
+0 15 0 5216
+0 15 0 5225
+0 15 0 5241
+0 15 0 5245
+0 15 0 5815
+0 15 0 6086
+0 15 0 6200
+0 15 0 6257
+0 15 0 6408
+0 15 0 6569
+0 15 0 6657
+0 15 0 6851
+0 15 0 6893
+0 15 0 6934
+0 15 0 7072
+0 15 0 7389
+0 15 0 7880
+0 15 0 7909
+0 15 0 8077
+0 15 0 8124
+0 15 0 8520
+0 15 0 8616
+0 15 0 10105
+0 15 0 10389
+0 15 0 10556
+0 15 0 10584
+0 15 0 11073
+0 15 0 11077
+0 15 0 11524
+0 15 0 11553
+0 15 0 11611
+0 15 0 11819
+0 15 0 11855
+0 15 0 11865
+0 15 0 12024
+0 15 0 12585
+0 15 0 12594
+0 15 0 12834
+0 15 0 13208
+0 15 0 13232
+0 15 0 13256
+0 15 0 13266
+0 15 0 13747
+0 15 0 13816
+0 15 0 13877
+0 15 0 13887
+0 15 0 14073
+0 15 0 14719
+0 15 0 15173
+0 15 0 15681
+0 15 0 16152
+0 15 0 16245
+0 15 0 16395
+0 15 0 17160
+0 15 1 18340
+0 15 1 18974
+0 15 1 18976
+0 15 1 18977
+0 15 1 18980
+0 15 1 18982
+0 15 1 18984
+0 15 1 18991
+0 15 1 19011
+0 15 1 19315
+0 15 1 19581
+0 15 1 19752
+0 15 1 20784
+0 15 1 21211
+0 15 1 21330
+0 15 1 21559
+0 15 1 22148
+0 15 1 22378
+0 15 2 22614
+0 15 2 22636
+0 15 2 22650
+0 15 2 22692
+0 15 2 22702
+0 15 2 22776
+0 15 2 22793
+0 15 2 22796
+0 15 2 22805
+0 15 2 22808
+0 15 2 22814
+0 15 2 22816
+0 15 2 22836
+0 15 2 22859
+0 15 2 22869
+0 15 2 22872
+0 15 2 22875
+0 15 2 22882
+0 15 2 22887
+0 15 2 22889
+0 15 2 22898
+0 15 2 22905
+0 15 2 22919
+0 15 2 22921
+0 15 2 22930
+0 15 2 22934
+0 15 2 22943
+0 15 2 22950
+0 15 2 22958
+0 15 2 22968
+0 15 2 22970
+0 15 2 22972
+0 15 2 22973
+0 15 2 22978
+0 15 2 22997
+0 15 2 23003
+0 15 2 23013
+0 15 2 23019
+0 15 2 23020
+0 15 2 23053
+0 15 2 23080
+0 15 2 23109
+0 15 2 23129
+0 15 2 23146
+0 15 2 23163
+0 15 2 23175
+0 15 2 23215
+0 15 2 23219
+0 15 2 23298
+0 15 2 23321
+0 15 2 23338
+0 15 2 23352
+0 15 2 23397
+0 15 2 23411
+0 15 2 23426
+0 15 2 23508
+0 15 2 23548
+0 15 2 23685
+0 15 2 23750
+0 15 2 23825
+0 15 2 23854
+0 15 2 23957
+0 15 2 23966
+0 15 2 24012
+0 15 2 24017
+0 15 2 24116
+0 15 2 24205
+0 15 2 24366
+0 15 2 24382
+0 15 2 24553
+0 15 2 25549
+0 15 2 26056
+0 15 2 26301
+0 15 2 26545
+0 15 2 26672
+0 15 2 26747
+0 15 2 26767
+0 15 2 26769
+0 15 2 26851
+0 15 2 26885
+0 15 2 26888
+0 15 2 26954
+0 15 2 27139
+0 15 2 27270
+0 15 2 27430
+0 15 2 27449
+0 15 2 27469
+0 15 2 27634
+0 15 2 27654
+0 15 2 27668
+0 15 2 27688
+0 15 2 27689
+0 15 2 27690
+0 15 2 27699
+0 15 2 27713
+0 15 2 27714
+0 15 2 27728
+0 15 2 27779
+0 15 2 27824
+0 15 2 27828
+0 15 2 27843
+0 15 2 27849
+0 15 2 27868
+0 15 2 27917
+0 15 2 27932
+0 15 2 27977
+0 15 2 28050
+0 15 2 28052
+0 15 2 28061
+0 15 2 28168
+0 15 2 28175
+0 15 2 28181
+0 15 2 28182
+0 15 2 28187
+0 15 2 28194
+0 15 2 28275
+0 15 2 28311
+0 15 2 28538
+0 15 2 28543
+0 15 2 28579
+0 15 2 28580
+0 15 2 28590
+0 15 2 28594
+0 15 2 28598
+0 15 2 28700
+0 15 2 28710
+0 15 2 28744
+0 15 2 28818
+0 15 2 28843
+0 15 2 28852
+0 15 2 28855
+0 15 2 28881
+0 15 2 28890
+0 15 2 28895
+0 15 2 28963
+0 15 2 29025
+0 15 2 29062
+0 15 2 29066
+0 15 2 29097
+0 15 2 29109
+0 15 2 29275
+0 15 2 29276
+0 15 2 29277
+0 15 2 29291
+0 15 2 29387
+0 15 2 29397
+0 15 2 29399
+0 15 2 29419
+0 15 2 29456
+0 15 2 29495
+0 15 2 29540
+0 15 2 29550
+0 15 2 29554
+0 15 2 29555
+0 15 2 29562
+0 15 2 29564
+0 15 2 29599
+0 15 2 29611
+0 15 2 29615
+0 15 2 29628
+0 15 2 29660
+0 15 2 29698
+0 15 2 29700
+0 15 2 29711
+0 15 2 29725
+0 15 2 29733
+0 15 2 29763
+0 15 2 29766
+0 15 2 29770
+0 15 2 29771
+0 15 2 29790
+0 15 2 29792
+0 15 2 29795
+0 15 2 29834
+0 15 2 29843
+0 15 2 29866
+0 15 2 29869
+0 15 2 29870
+0 15 2 29913
+0 15 2 29914
+0 15 2 29925
+0 15 2 29964
+0 15 2 29972
+0 15 2 29973
+0 15 2 29975
+0 15 2 30001
+0 15 2 30013
+0 15 2 30043
+0 15 2 30104
+0 15 2 30115
+0 15 2 30122
+0 15 2 30136
+0 15 2 30207
+0 15 2 30331
+0 15 2 30338
+0 15 2 30342
+0 15 2 30381
+0 15 2 30564
+0 15 2 30576
+0 15 2 30589
+0 15 2 30606
+0 15 2 30616
+0 15 2 30625
+0 15 2 30628
+0 15 2 30629
+0 15 2 30726
+0 15 2 30728
+0 15 2 30729
+0 15 2 30747
+0 15 2 30749
+0 15 2 30808
+0 15 2 30840
+0 15 2 30869
+0 15 2 30889
+0 15 2 30894
+0 15 2 30939
+0 15 2 30952
+0 15 2 30963
+0 15 2 31004
+0 15 2 31071
+0 15 2 31106
+0 15 2 31118
+0 15 2 31119
+0 15 2 31143
+0 15 2 31147
+0 15 2 31158
+0 15 2 31163
+0 15 2 31192
+0 15 2 31193
+0 15 2 31221
+0 15 2 31285
+0 15 2 31293
+0 15 2 31302
+0 15 2 31305
+0 15 2 31318
+0 15 2 31320
+0 15 2 31338
+0 15 2 31353
+0 15 2 31358
+0 15 2 31363
+0 15 2 31377
+0 15 2 31379
+0 15 2 31381
+0 15 2 31387
+0 15 2 31437
+0 15 2 31465
+0 15 2 31507
+0 15 2 31517
+0 15 2 31518
+0 15 2 31557
+0 15 2 31608
+0 15 2 31609
+0 15 2 31612
+0 15 2 31617
+0 15 2 31636
+0 15 2 31657
+0 15 2 31707
+0 15 2 31765
+0 15 2 31797
+0 15 2 31902
+0 15 2 32029
+0 15 2 32131
+0 15 2 32149
+0 15 2 32183
+0 15 2 32257
+0 15 2 32412
+0 15 2 32441
+0 15 2 32443
+0 15 2 32808
+0 15 2 33055
+0 15 2 33148
+0 15 2 33453
+0 15 2 33774
+0 15 2 34088
+0 15 2 34457
+0 15 2 34494
+0 15 2 34500
+0 15 2 34527
+0 15 2 34558
+0 15 2 34572
+0 15 2 34835
+0 15 2 34849
+0 15 2 34866
+0 15 2 34934
+0 15 2 35035
+0 15 2 35054
+0 15 2 35077
+0 15 2 35154
+0 15 2 35407
+0 15 3 35663
+0 15 3 35769
+0 15 3 35798
+0 15 3 35808
+0 15 3 35812
+0 15 3 35852
+0 15 3 35859
+0 15 3 36104
+0 15 3 36255
+0 15 3 36272
+0 15 3 36280
+0 15 3 36290
+0 15 3 36465
+0 15 3 36503
+0 15 3 36514
+0 15 3 36591
+0 15 3 36656
+0 15 3 36824
+0 15 3 36867
+0 15 3 36907
+0 15 3 36909
+0 15 3 36924
+0 15 3 37013
+0 15 3 37091
+0 15 3 37187
+0 15 3 37264
+0 15 3 37268
+0 15 3 37310
+0 15 3 37313
+0 15 3 38336
+0 15 3 38763
+0 15 3 38897
+0 15 3 38959
+0 15 3 38972
+0 15 3 38989
+0 15 3 39272
+0 15 3 39308
+0 15 3 39382
+0 15 3 39413
+0 15 3 39414
+0 15 3 39719
+0 15 3 39771
+0 15 3 40083
+0 15 3 40156
+0 15 3 40160
+0 15 3 40161
+0 15 3 40170
+0 15 3 40185
+0 15 3 40198
+0 15 3 40209
+0 15 3 40237
+0 15 3 40413
+0 15 3 40552
+0 15 3 40704
+0 15 3 40725
+0 15 3 40773
+0 15 3 40780
+0 15 3 40787
+0 15 3 40796
+0 15 3 40868
+0 15 3 41036
+0 15 3 41344
+0 15 3 41359
+0 15 3 41487
+0 15 3 41502
+0 15 3 41530
+0 15 3 41555
+0 15 3 41627
+0 15 3 41672
+0 15 3 41675
+0 15 3 41947
+0 15 3 42505
+0 15 3 42949
+0 15 3 43009
+0 15 3 43438
+0 15 3 43478
+0 15 3 43574
+0 15 3 44307
+0 15 3 44715
+0 15 3 44765
+0 15 3 44998
+0 15 3 45232
+0 15 3 45890
+0 15 3 45905
+0 15 4 46135
+0 15 4 46259
+0 15 4 46438
+0 15 4 46541
+0 15 4 46778
+0 15 4 46972
+0 15 4 47270
+0 15 4 48039
+0 15 4 48058
+0 15 4 48137
+0 15 4 48319
+0 15 4 48919
+0 15 4 48950
+0 15 4 48965
+0 15 5 49507
+0 15 5 49543
+0 15 5 50470
+0 15 5 51889
+0 15 5 52306
+0 15 5 52675
+0 15 5 53003
+0 15 5 53143
+0 15 5 53297
+0 15 5 53854
+0 15 6 54160
+0 15 6 54329
+0 15 6 54458
+0 15 6 54462
+0 15 6 54731
+0 15 6 55214
+0 15 6 55633
+0 15 6 55639
+0 15 6 56030
+0 15 6 56168
+0 15 6 56842
+0 15 6 57026
+0 15 6 57296
+0 15 6 57580
+0 15 6 57849
+0 15 6 57956
+0 15 6 58123
+0 15 6 58261
+0 15 6 58413
+0 15 6 58508
+0 15 6 58664
+0 15 6 58751
+0 15 6 58752
+0 15 6 58893
+0 15 6 58912
+0 15 6 59049
+0 15 6 59212
+0 15 6 59263
+0 15 7 59385
+0 15 7 59400
+0 15 7 59433
+0 15 7 59493
+0 15 7 59543
+0 15 7 59549
+0 15 7 59602
+0 15 7 59623
+0 15 7 59631
+0 15 7 59635
+0 15 7 59637
+0 15 7 59657
+0 15 7 59701
+0 15 7 59829
+0 15 7 59860
+0 15 7 59919
+0 15 7 59943
+0 15 7 60047
+0 15 7 60053
+0 15 7 60104
+0 15 7 60138
+0 15 7 60165
+0 15 7 60221
+0 15 7 60222
+0 15 7 60281
+0 15 7 60305
+0 15 7 60332
+0 15 7 60502
+0 15 7 60546
+0 15 7 60560
+0 15 7 60586
+0 15 7 60651
+0 15 7 60699
+0 15 7 60762
+0 15 7 60763
+0 15 7 60774
+0 15 7 60808
+0 15 7 60857
+0 15 7 60885
+0 15 7 60978
+0 15 7 60984
+0 15 7 61016
+0 15 7 61017
+0 15 7 61029
+0 15 7 61059
+0 15 7 61066
+0 15 7 61077
+0 15 7 61084
+0 15 7 61104
+0 15 7 61111
+0 15 7 61123
+0 15 7 61124
+0 15 7 61126
+0 15 7 61130
+0 15 7 61157
+0 15 7 61167
+0 15 7 61175
+0 15 7 61227
+0 15 7 61228
+0 15 7 61237
+0 15 7 61245
+0 15 7 61255
+0 15 7 61278
+0 15 7 61283
+0 15 7 61289
+0 15 7 61290
+0 15 7 61294
+0 15 7 61295
+0 15 7 61306
+0 15 7 61455
+0 15 7 61456
+0 15 7 61491
+0 15 7 61496
+0 15 7 61529
+0 15 7 61555
+0 15 7 61575
+0 15 7 61596
+0 15 7 61637
+0 15 7 61639
+0 15 7 61714
+0 15 7 61719
+0 15 7 61887
+0 15 7 61958
+0 15 7 62002
+0 15 7 62047
+0 15 7 62072
+0 15 7 62132
+0 15 7 62169
+0 15 7 62170
+0 15 7 62172
+0 15 7 62193
+0 15 7 62207
+0 15 7 62213
+0 15 7 62224
+0 15 7 62231
+0 15 7 62235
+0 15 7 62236
+0 15 7 62247
+0 15 7 62257
+0 15 7 62259
+0 15 7 62261
+0 15 7 62273
+0 15 7 62281
+0 15 7 62297
+0 15 7 62298
+0 15 7 62305
+0 15 7 62316
+0 15 7 62324
+0 15 7 62326
+0 15 7 62327
+0 15 7 62395
+0 15 7 62434
+0 15 7 62438
+0 15 7 62440
+0 15 7 62471
+0 15 7 62479
+0 15 7 62498
+0 15 7 62523
+0 15 7 62536
+0 15 7 62616
+0 15 7 62659
+0 15 7 62746
+0 15 7 62756
+0 15 7 62763
+0 15 7 62767
+0 15 7 62774
+0 15 7 62817
+0 15 7 62842
+0 15 7 62843
+0 15 7 62888
+0 15 7 62907
+0 15 7 62942
+0 15 7 62947
+0 15 7 62948
+0 15 7 62949
+0 15 7 62977
+0 15 7 63003
+0 15 7 63014
+0 15 7 63049
+0 15 7 63080
+0 15 7 63083
+0 15 7 63086
+0 15 7 63112
+0 15 7 63123
+0 15 7 63125
+0 15 7 63142
+0 15 7 63143
+0 15 7 63144
+0 15 7 63157
+0 15 7 63164
+0 15 7 63193
+0 15 7 63195
+0 15 7 63201
+0 15 7 63213
+0 15 7 63214
+0 15 7 63440
+0 15 7 63462
+0 15 7 63474
+0 15 7 63488
+0 15 7 63496
+0 15 7 63502
+0 15 7 63505
+0 15 7 63580
+0 15 7 63582
+0 15 7 63592
+0 15 7 63600
+0 15 7 63624
+0 15 7 63626
+0 15 7 63975
+0 15 7 64386
+0 15 7 64631
+0 15 7 64645
+0 15 7 65046
+0 15 7 65182
+0 15 7 65478
+0 15 7 65609
+0 15 7 65635
+0 15 7 65759
+0 15 7 65785
+0 15 7 65818
+0 15 7 65848
+0 15 7 65862
+0 15 7 66101
+0 15 7 66218
+0 15 7 66246
+0 15 7 66273
+0 15 7 66281
+0 15 7 66442
+0 15 7 66482
+0 15 7 66486
+0 15 7 66514
+0 15 7 66676
+0 15 7 66700
+0 15 7 66715
+0 15 7 66718
+0 15 7 66764
+0 15 7 66775
+0 15 7 66780
+0 15 7 66799
+0 15 7 66890
+0 15 7 66954
+0 15 7 67015
+0 15 7 67025
+0 15 7 67059
+0 15 7 67176
+0 15 7 67203
+0 15 7 67671
+0 15 7 67799
+0 15 7 68111
+0 15 7 68458
+0 15 7 68466
+0 15 7 68526
+0 15 7 68539
+0 15 7 68679
+0 15 7 68802
+0 15 7 68803
+0 15 7 68839
+0 15 7 68991
+0 15 7 69095
+0 15 7 69171
+0 15 7 69228
+0 15 7 69239
+0 15 7 69242
+0 15 7 69259
+0 15 7 69267
+0 15 7 69733
+0 15 7 69818
+0 15 7 69884
+0 15 7 70302
+0 15 7 70489
+0 15 7 70490
+0 15 7 70638
+0 15 7 70782
+0 15 7 70852
+0 15 7 70862
+0 15 7 70890
+0 15 7 70894
+0 15 7 70898
+0 15 7 70900
+0 15 7 70904
+0 15 7 70941
+0 15 7 71095
+0 15 7 71189
+0 15 7 71201
+0 15 7 71217
+0 15 7 71318
+0 15 7 71320
+0 15 7 71326
+0 15 7 71335
+0 15 7 71447
+0 15 7 71470
+0 15 7 71495
+0 15 7 71649
+0 15 7 71694
+0 15 7 71695
+0 15 7 71930
+0 15 7 71940
+0 15 7 72011
+0 15 7 72017
+0 15 7 72139
+0 15 7 72211
+0 15 7 72250
+0 15 8 72482
+0 15 8 72718
+0 15 8 72797
+0 15 8 72880
+0 15 8 73039
+0 15 8 73042
+0 15 8 73165
+0 15 8 73168
+0 15 8 73199
+0 15 8 73204
+0 15 8 73295
+0 15 8 73446
+0 15 8 73585
+0 15 8 73601
+0 15 8 73621
+0 15 8 73881
+0 15 8 73990
+0 15 8 74000
+0 15 8 74046
+0 15 8 74068
+0 15 8 74161
+0 15 8 74296
+0 15 8 74428
+0 15 8 74470
+0 15 8 74473
+0 15 8 74568
+0 15 8 74582
+0 15 8 74631
+0 15 8 74714
+0 15 8 74797
+0 15 8 74864
+0 15 8 74989
+0 15 8 75095
+0 15 8 75122
+0 15 8 75221
+0 15 8 75231
+0 15 8 75248
+0 15 8 75423
+0 15 8 75469
+0 15 8 75535
+0 15 8 75594
+0 15 8 75601
+0 15 8 75624
+0 15 8 75635
+0 15 8 75641
+0 15 8 75645
+0 15 8 75663
+0 15 8 75762
+0 15 8 75875
+0 15 8 75889
+0 15 8 76170
+0 15 8 76264
+0 15 8 76970
+0 15 8 77009
+0 15 8 77186
+0 15 8 77287
+0 15 8 77420
+0 15 8 77530
+0 15 8 77795
+0 15 8 77887
+0 15 8 77958
+0 15 8 78015
+0 15 8 78090
+0 15 8 78365
+0 15 8 78725
+0 15 8 78865
+0 15 8 78972
+0 15 8 78982
+0 15 8 79058
+0 15 8 79105
+0 15 8 79126
+0 15 8 79129
+0 15 8 79246
+0 15 8 79585
+0 15 8 79619
+0 15 8 79679
+0 15 8 79685
+0 15 8 79687
+0 15 8 79726
+0 15 8 79746
+0 15 8 79754
+0 15 8 79757
+0 15 8 79760
+0 15 8 79761
+0 15 8 79763
+0 15 8 79764
+0 15 8 79790
+0 15 8 79799
+0 15 8 79800
+0 15 8 79806
+0 15 8 79862
+0 15 8 79865
+0 15 8 79892
+0 15 8 80078
+0 15 8 80099
+0 15 8 80153
+0 15 8 80155
+0 15 8 80258
+0 15 8 80398
+0 15 8 80403
+0 15 8 80415
+0 15 8 80417
+0 15 8 80437
+0 15 8 80452
+0 15 8 80470
+0 15 8 80568
+0 15 8 80777
+0 15 8 80868
+0 15 8 80891
+0 15 8 80990
+0 15 8 81133
+0 15 8 81435
+0 15 8 81495
+0 15 8 81565
+0 15 8 81571
+0 15 8 81732
+0 15 8 81739
+0 15 8 81803
+0 15 8 81839
+0 15 8 81910
+0 15 8 82131
+0 15 8 82331
+0 15 8 82581
+0 15 8 82622
+0 15 8 82641
+0 15 8 82685
+0 15 8 82688
+0 15 8 82736
+0 15 8 82743
+0 15 8 82781
+0 15 8 82788
+0 15 8 82795
+0 15 8 82796
+0 15 8 82825
+0 15 8 82836
+0 15 8 83000
+0 15 8 83162
+0 15 8 83258
+0 15 8 83305
+0 15 8 83331
+0 15 8 83645
+0 15 8 83668
+0 15 8 84296
+0 15 8 84389
+0 15 8 84448
+0 15 8 84473
+0 15 8 84484
+0 15 8 84514
+0 15 8 84534
+0 15 8 84537
+0 15 8 84690
+0 15 8 84721
+0 15 8 84967
+0 15 8 84998
+0 15 8 85006
+0 15 8 85032
+0 15 8 85112
+0 15 8 85144
+0 15 8 85159
+0 15 8 85182
+0 15 8 85238
+0 15 8 85270
+0 15 8 85282
+0 15 8 85284
+0 15 8 85288
+0 15 8 85307
+0 15 8 85314
+0 15 8 85370
+0 15 8 85377
+0 15 8 85380
+0 15 8 85451
+0 15 8 85523
+0 15 8 85627
+0 15 8 85686
+0 15 8 85945
+0 15 8 85952
+0 15 8 86069
+0 15 8 86192
+0 15 8 86197
+0 15 8 86200
+0 15 8 86272
+0 15 8 86273
+0 15 8 86313
+0 15 8 86335
+0 15 8 86344
+0 15 8 86358
+0 15 8 86361
+0 15 8 86377
+0 15 8 86391
+0 15 8 86399
+0 15 8 86404
+0 15 8 86455
+0 15 8 86459
+0 15 8 86503
+0 15 8 86532
+0 15 8 86539
+0 15 8 86636
+0 15 8 86637
+0 15 8 86718
+0 15 8 86755
+0 15 8 86803
+0 15 8 86913
+0 15 8 86915
+0 15 8 86950
+0 15 8 86998
+0 15 8 87005
+0 15 8 87017
+0 15 8 87046
+0 15 8 87060
+0 15 8 87243
+0 15 8 87284
+0 15 8 87290
+0 15 8 87481
+0 15 8 87499
+0 15 8 87502
+0 15 8 87584
+0 15 8 87586
+0 15 8 87594
+0 15 8 87602
+0 15 8 87603
+0 15 8 87604
+0 15 8 87657
+0 15 8 87673
+0 15 8 87751
+0 15 8 87785
+0 15 8 87815
+0 15 8 87824
+0 15 8 87849
+0 15 8 87869
+0 15 8 87870
+0 15 8 87897
+0 15 8 87903
+0 15 8 87926
+0 15 8 87962
+0 15 8 87980
+0 15 8 87988
+0 15 8 88062
+0 15 8 88128
+0 15 8 88194
+0 15 8 88227
+0 15 8 88253
+0 15 8 88254
+0 15 8 88265
+0 15 8 88270
+0 15 8 88280
+0 15 8 88372
+0 15 8 88404
+0 15 8 88413
+0 15 8 88435
+0 15 8 88439
+0 15 8 88441
+0 15 8 88449
+0 15 8 88479
+0 15 8 88482
+0 15 8 88490
+0 15 8 88526
+0 15 8 88546
+0 15 8 88571
+0 15 8 88577
+0 15 8 88589
+0 15 8 88635
+0 15 8 88658
+0 15 8 88716
+0 15 8 88719
+0 15 8 88726
+0 15 8 88771
+0 15 8 88786
+0 15 8 88800
+0 15 8 88821
+0 15 8 88837
+0 15 8 88853
+0 15 8 88859
+0 15 8 88861
+0 15 8 88864
+0 15 8 88885
+0 15 8 88912
+0 15 8 88926
+0 15 8 88929
+0 15 8 88961
+0 15 8 89000
+0 15 8 89057
+0 15 8 89111
+0 15 8 89120
+0 15 8 89146
+0 15 8 89280
+0 15 8 89345
+0 15 8 89362
+0 15 8 89366
+0 15 8 89367
+0 15 8 89386
+0 15 8 89445
+0 15 8 89532
+0 15 8 89533
+0 15 8 89584
+0 15 8 89588
+0 15 8 89594
+0 15 8 89600
+0 15 8 89604
+0 15 8 89613
+0 15 8 89658
+0 15 8 89677
+0 15 8 89711
+0 15 8 89726
+0 15 8 89741
+0 15 8 89756
+0 15 8 89798
+0 15 8 89811
+0 15 9 90311
+0 15 9 90318
+0 15 9 90336
+0 15 9 90354
+0 15 9 90478
+0 15 9 90765
+0 15 9 90988
+0 15 9 91321
+0 15 9 91505
+0 15 9 91730
+0 15 9 91792
+0 15 9 91816
+0 15 9 91873
+0 15 9 91923
+0 15 10 92360
+0 15 10 92505
+0 15 10 92520
+0 15 10 92576
+0 15 10 92593
+0 15 10 92600
+0 15 10 92613
+0 15 10 92614
+0 15 10 92616
+0 15 10 92672
+0 15 10 92765
+0 15 10 92792
+0 15 10 92806
+0 15 10 92815
+0 15 10 92818
+0 15 10 92823
+0 15 10 92824
+0 15 10 92851
+0 15 10 92875
+0 15 10 92927
+0 15 10 92931
+0 15 10 92953
+0 15 10 92995
+0 15 10 93001
+0 15 10 93011
+0 15 10 93040
+0 15 10 93054
+0 15 10 93056
+0 15 10 93065
+0 15 10 93092
+0 15 10 93094
+0 15 10 93120
+0 15 10 93146
+0 15 10 93154
+0 15 10 93168
+0 15 10 93209
+0 15 10 93242
+0 15 10 93309
+0 15 10 93322
+0 15 10 93326
+0 15 10 93329
+0 15 10 93343
+0 15 10 93363
+0 15 10 93375
+0 15 10 93408
+0 15 10 93421
+0 15 10 93442
+0 15 10 93465
+0 15 10 93481
+0 15 10 93497
+0 15 10 93548
+0 15 10 93586
+0 15 10 93614
+0 15 10 93646
+0 15 10 93663
+0 15 10 93672
+0 15 10 93673
+0 15 10 93709
+0 15 10 93780
+0 15 10 93782
+0 15 10 93849
+0 15 10 93858
+0 15 10 93874
+0 15 10 93888
+0 15 10 93906
+0 15 10 93958
+0 15 10 93973
+0 15 10 94040
+0 15 10 94091
+0 15 10 94128
+0 15 10 94199
+0 15 10 94211
+0 15 10 94240
+0 15 10 94284
+0 15 10 94323
+0 15 10 94324
+0 15 10 94332
+0 15 10 94356
+0 15 10 94435
+0 15 10 94513
+0 15 10 94549
+0 15 10 94556
+0 15 10 94573
+0 15 10 94598
+0 15 10 94603
+0 15 10 94679
+0 15 10 94688
+0 15 10 94741
+0 15 10 94779
+0 15 10 94781
+0 15 10 94784
+0 15 10 94831
+0 15 10 94848
+0 15 10 94953
+0 15 10 94969
+0 15 10 95202
+0 15 10 95281
+0 15 10 95576
+0 15 10 95640
+0 15 10 95661
+0 15 10 95752
+0 15 10 95775
+0 15 10 95826
+0 15 10 96045
+0 15 10 96072
+0 15 10 96082
+0 15 10 96104
+0 15 10 96123
+0 15 10 96195
+0 15 10 96281
+0 15 10 96520
+0 15 10 96665
+0 15 10 96696
+0 15 10 96701
+0 15 10 96706
+0 15 10 96707
+0 15 10 96731
+0 15 10 96895
+0 15 10 97053
+0 15 10 97082
+0 15 10 97086
+0 15 10 97116
+0 15 10 97118
+0 15 10 97325
+0 15 10 97368
+0 15 10 97373
+0 15 10 97390
+0 15 10 97416
+0 15 10 97479
+0 15 10 97489
+0 15 10 97494
+0 15 10 97502
+0 15 10 97503
+0 15 10 97521
+0 15 10 97536
+0 15 10 97546
+0 15 10 97548
+0 15 10 97549
+0 15 10 97567
+0 15 10 97576
+0 15 10 97579
+0 15 10 97584
+0 15 10 97703
+0 15 10 97822
+0 15 10 97823
+0 15 10 97872
+0 15 10 97927
+0 15 10 97943
+0 15 10 97983
+0 15 10 98026
+0 15 10 98138
+0 15 10 98182
+0 15 10 98194
+0 15 10 98376
+0 15 10 98494
+0 15 10 98561
+0 15 10 98643
+0 15 10 98720
+0 15 10 98800
+0 15 10 98959
+0 15 10 99043
+0 15 10 99120
+0 15 10 99160
+0 15 10 99228
+0 15 10 99433
+0 15 10 99438
+0 15 10 99500
+0 15 10 99550
+0 15 10 99617
+0 15 10 99690
+0 15 10 99764
+0 15 10 100135
+0 15 10 100162
+0 15 10 100346
+0 15 10 100377
+0 15 10 100396
+0 15 10 100420
+0 15 10 100533
+0 15 10 100724
+0 15 10 100923
+0 15 10 101508
+0 15 10 101514
+0 15 10 101529
+0 15 10 101574
+0 15 10 101851
+0 15 10 101862
+0 15 10 101878
+0 15 10 101899
+0 15 10 102035
+0 15 10 102145
+0 15 10 102311
+0 15 10 102369
+0 15 10 102412
+0 15 10 102444
+0 15 10 102463
+0 15 10 102468
+0 15 10 102619
+0 15 10 102646
+0 15 10 102725
+0 15 10 102962
+0 15 10 102970
+0 15 10 103097
+0 15 10 103104
+0 15 10 103237
+0 15 10 103258
+0 15 10 103267
+0 15 10 103284
+0 15 10 103288
+0 15 10 103388
+0 15 10 103449
+0 15 10 103634
+0 15 10 103666
+0 15 10 103910
+0 15 10 104021
+0 15 10 104079
+0 15 10 104337
+0 15 10 104358
+0 15 10 104439
+0 15 10 104448
+0 15 10 104479
+0 15 10 104515
+0 15 10 104533
+0 15 10 104555
+0 15 10 104565
+0 15 10 104618
+0 15 10 104697
+0 15 10 104857
+0 15 10 104934
+0 15 10 104973
+0 15 10 105027
+0 15 10 105028
+0 15 10 105050
+0 15 10 105056
+0 15 10 105102
+0 15 10 105118
+0 15 10 105428
+0 15 10 105493
+0 15 10 105581
+0 15 10 105590
+0 15 10 105604
+0 15 10 105613
+0 15 10 105699
+0 15 10 105709
+0 15 10 105714
+0 15 10 105718
+0 15 10 105719
+0 15 10 105721
+0 15 10 105787
+0 15 10 105795
+0 15 10 105804
+0 15 10 105810
+0 15 10 105835
+0 15 10 105871
+0 15 10 105872
+0 15 10 105878
+0 15 10 105892
+0 15 10 105911
+0 15 10 105915
+0 15 10 105916
+0 15 10 105917
+0 15 10 105931
+0 15 10 105954
+0 15 10 105958
+0 15 10 105960
+0 15 10 105962
+0 15 10 105967
+0 15 10 105971
+0 15 10 105972
+0 15 10 106003
+0 15 10 106015
+0 15 10 106020
+0 15 10 106026
+0 15 10 106046
+0 15 10 106056
+0 15 10 106063
+0 15 10 106075
+0 15 10 106076
+0 15 10 106087
+0 15 10 106093
+0 15 10 106141
+0 15 10 106154
+0 15 10 106155
+0 15 10 106157
+0 15 10 106159
+0 15 10 106176
+0 15 10 106197
+0 15 10 106234
+0 15 10 106262
+0 15 10 106287
+0 15 10 106379
+0 15 10 106418
+0 15 10 106512
+0 15 10 106527
+0 15 10 106529
+0 15 10 106551
+0 15 10 106556
+0 15 10 106571
+0 15 10 106628
+0 15 10 106635
+0 15 10 106677
+0 15 10 106688
+0 15 10 106690
+0 15 10 106717
+0 15 10 106765
+0 15 10 106778
+0 15 10 106797
+0 15 10 106814
+0 15 10 106932
+0 15 10 106988
+0 15 10 106997
+0 15 10 107008
+0 15 10 107019
+0 15 10 107030
+0 15 10 107099
+0 15 10 107188
+0 15 10 107198
+0 15 10 107683
+0 15 10 107684
+0 15 10 107715
+0 15 10 107966
+0 15 10 108151
+0 15 10 108282
+0 15 10 108322
+0 15 11 108560
+0 15 11 108662
+0 15 11 108782
+0 15 11 109342
+0 15 11 109602
+0 15 11 109725
+0 15 11 110029
+0 15 11 110943
+0 15 11 111109
+0 15 11 111305
+0 15 11 111525
+0 15 11 111653
+0 15 11 112042
+0 15 11 112077
+0 15 11 112197
+0 15 11 112388
+0 15 11 112511
+0 15 11 112530
+0 15 11 112756
+0 15 11 113074
+0 15 11 113164
+0 15 11 114372
+0 15 11 114456
+0 15 11 114687
+0 15 11 115971
+0 15 11 116435
+0 15 11 116863
+0 15 12 117909
+0 15 12 117910
+0 15 12 118040
+0 15 12 118505
+0 15 12 118900
+0 15 12 119128
+0 15 12 119297
+0 15 12 119415
+0 15 12 119684
+0 15 12 119706
+0 15 12 119892
+0 15 12 120584
+0 15 12 120728
+0 15 12 120855
+0 15 12 120949
+0 15 12 120991
+0 15 12 121211
+0 15 12 121240
+0 15 12 121416
+0 15 12 121555
+0 15 12 121659
+0 15 12 121673
+0 15 12 121765
+0 15 12 121807
+0 15 12 121813
+0 15 12 121833
+0 15 12 121844
+0 15 12 121866
+0 15 12 121867
+0 15 12 121871
+0 15 12 121881
+0 15 12 121895
+0 15 12 121912
+0 15 12 121915
+0 15 12 121972
+0 15 12 122004
+0 15 12 122006
+0 15 12 122008
+0 15 12 122090
+0 15 12 122091
+0 15 12 122110
+0 15 12 122189
+0 15 12 122190
+0 15 12 122191
+0 15 12 122198
+0 15 12 122208
+0 15 12 122258
+0 15 12 122267
+0 15 12 122329
+0 15 12 122371
+0 15 12 122394
+0 15 12 122408
+0 15 12 122416
+0 15 12 122439
+0 15 12 122455
+0 15 12 122487
+0 15 12 122533
+0 15 12 122541
+0 15 12 122582
+0 15 12 122617
+0 15 12 122618
+0 15 13 122705
+0 15 13 122771
+0 15 13 123339
+0 15 13 123500
+0 15 13 123615
+0 15 13 123621
+0 15 13 123823
+0 15 13 123949
+0 15 13 124015
+0 15 13 124056
+0 15 13 124064
+0 15 13 124071
+0 15 13 124077
+0 15 13 124173
+0 15 13 124308
+0 15 13 124390
+0 15 13 124391
+0 15 13 124436
+0 15 13 124790
+0 15 13 124797
+0 15 13 124837
+0 15 13 124856
+0 15 13 124859
+0 15 13 124860
+0 15 13 124911
+0 15 14 125768
+0 15 14 125813
+0 15 14 126219
+0 15 14 126305
+0 15 14 126455
+0 15 14 126636
+0 15 14 126642
+0 15 14 126907
+0 15 14 126942
+0 15 14 127184
+0 15 14 127380
+0 15 14 127399
+0 15 14 127400
+0 15 14 127417
+0 15 14 127421
+0 15 14 127441
+0 15 14 127444
+0 15 14 127500
+0 15 14 127549
+0 15 14 127555
+0 15 14 127570
+0 15 14 127589
+0 15 14 127602
+0 15 14 127640
+0 15 14 127737
+0 15 14 127908
+0 15 14 127936
+0 15 14 127939
+0 15 14 127940
+0 15 14 127948
+0 15 14 127952
+0 15 14 128148
+0 15 14 128389
+0 15 14 128668
+0 15 14 128677
+0 15 14 128902
+0 15 14 128917
+0 15 14 128949
+0 15 14 129122
+0 15 14 129734
+0 15 14 129868
+0 15 14 129876
+0 15 14 129879
+0 15 14 129885
+0 15 14 129895
+0 15 14 130022
+0 15 14 130023
+0 15 14 130046
+0 15 14 130055
+0 15 14 130056
+0 15 14 130080
+0 15 14 130084
+0 15 14 130086
+0 15 14 130186
+0 15 14 130241
+0 15 14 130242
+0 15 14 130246
+0 15 14 130284
+0 15 14 130309
+0 15 14 130310
+0 15 14 130380
+0 15 14 130396
+0 15 14 130399
+0 15 14 130409
+0 15 14 130410
+0 15 14 130440
+0 15 14 130571
+0 15 14 130584
+0 15 14 130640
+0 15 14 130680
+0 15 14 130706
+0 15 14 130720
+0 15 14 130742
+0 15 14 130801
+0 15 14 130846
+0 15 14 130847
+0 15 14 130853
+0 15 14 130855
+0 15 14 130860
+0 15 14 130861
+0 15 14 130866
+0 15 14 130870
+0 15 14 130871
+0 15 14 130881
+0 15 14 130894
+0 15 14 130896
+0 15 14 130897
+0 15 14 130915
+0 15 14 130918
+0 15 14 130920
+0 15 14 130929
+0 15 14 130930
+0 15 14 130933
+0 15 14 130934
+0 15 14 130949
+0 15 14 130956
+0 15 14 130957
+0 15 14 130961
+0 15 14 130986
+0 15 14 130987
+0 15 14 131002
+0 15 14 131006
+0 15 14 131010
+0 15 14 131016
+0 15 14 131019
+0 15 14 131026
+0 15 14 131029
+0 15 14 131035
+0 15 14 131043
+0 15 14 131046
+0 15 14 131048
+0 15 14 131052
+0 15 14 131053
+0 15 14 131057
+0 15 14 131071
+0 15 14 131083
+0 15 14 131094
+0 15 14 131095
+0 15 14 131105
+0 15 14 131161
+0 15 14 131173
+0 15 14 131233
+0 15 15 131414
+0 15 15 131935
+0 15 15 132702
+0 15 15 132880
+0 15 15 132922
+0 15 15 132934
+0 15 15 133122
+0 15 15 133144
+0 15 15 133238
+0 15 15 133246
+0 15 15 133321
+0 15 15 133392
+0 15 15 133413
+0 15 15 133587
+0 15 15 133605
+0 15 15 133991
+0 15 15 134119
+0 15 15 134152
+0 15 15 134240
+0 15 15 134376
+0 15 15 134380
+0 15 15 134410
+0 15 15 134428
+0 15 15 134433
+0 15 15 134469
+0 15 15 134475
+0 15 15 134575
+0 15 15 134580
+0 15 15 134581
+0 15 15 134599
+0 15 15 134846
+0 15 15 134880
+0 15 15 134938
+0 15 15 134952
+0 15 15 134962
+0 15 15 135116
+0 15 15 135158
+0 15 15 135214
+0 15 15 135307
+0 15 15 135397
+0 15 15 135627
+0 15 15 135629
+0 15 15 135635
+0 15 15 135650
+0 15 15 135655
+0 15 15 135670
+0 15 15 135706
+0 15 15 135730
+0 15 15 135861
+0 15 15 135945
+0 15 15 136110
+0 15 15 136300
+0 15 15 137114
+0 15 15 138034
+0 15 15 138648
+0 15 15 139112
+0 15 15 139376
+0 15 15 139476
+0 15 15 139988
+0 15 15 140263
+0 15 16 140452
+0 15 16 140797
+0 15 16 140798
+0 15 16 141106
+0 15 16 141173
+0 15 16 141468
+0 15 16 141646
+0 15 16 141704
+0 15 16 141909
+0 15 16 142109
+0 15 16 142627
+0 15 16 142643
+0 15 16 143084
+0 15 16 143258
+0 15 16 143426
+0 15 16 143929
+0 15 16 144024
+0 15 16 146003
+0 15 16 146208
+0 15 17 146340
+0 15 17 146408
+0 15 17 146561
+0 15 17 146679
+0 15 17 147422
+0 15 17 148881
+0 15 17 150156
+0 15 17 150210
+0 15 17 150691
+0 15 17 150767
+0 15 17 150892
+0 15 17 152037
+0 15 17 152133
+0 15 17 152143
+0 15 17 152149
+0 15 17 152193
+0 15 17 152195
+0 15 17 152219
+0 15 17 152312
+0 15 17 152546
+0 15 17 152596
+0 15 17 152650
+0 15 17 152654
+0 15 17 152990
+0 15 17 152992
+0 15 18 153080
+0 15 18 154271
+0 15 18 154389
+0 15 18 154463
+0 15 18 154666
+0 15 18 154701
+0 15 18 154763
+0 15 18 154777
+0 15 18 154807
+0 15 18 155143
+0 15 18 155283
+0 15 18 155331
+0 15 18 155334
+0 15 18 155340
+0 15 18 155371
+0 15 18 155430
+0 15 18 155431
+0 15 18 155443
+0 15 18 155465
+0 15 18 155500
+0 15 18 155508
+0 15 18 155531
+0 15 18 155584
+0 15 18 155682
+0 15 18 155700
+0 15 18 155703
+0 15 18 155709
+0 15 18 155752
+0 15 18 155761
+0 15 18 155824
+0 15 18 155834
+0 15 18 155843
+0 15 18 155847
+0 15 18 155855
+0 15 18 155859
+0 15 18 155915
+0 15 18 155920
+0 15 18 155921
+0 15 18 155978
+0 15 18 155979
+0 15 18 156004
+0 15 18 156044
+0 15 18 156106
+0 15 18 156188
+0 15 18 156283
+0 15 18 156320
+0 15 18 156387
+0 15 18 156396
+0 15 18 156414
+0 15 18 156415
+0 15 18 156418
+0 15 18 156447
+0 15 18 156451
+0 15 18 156455
+0 15 18 156515
+0 15 18 156535
+0 15 18 156537
+0 15 18 156554
+0 15 18 156651
+0 15 18 156664
+0 15 18 156666
+0 15 18 156689
+0 15 18 156695
+0 15 18 156766
+0 15 18 156804
+0 15 18 156879
+0 15 18 156904
+0 15 18 156914
+0 15 18 157015
+0 15 18 157069
+0 15 18 157341
+0 15 18 157365
+0 15 18 157438
+0 15 18 157511
+0 15 18 157545
+0 15 18 157766
+0 15 18 157852
+0 15 18 157877
+0 15 18 157929
+0 15 18 158645
+0 15 18 158654
+0 15 18 159390
+0 15 18 159405
+0 15 18 159574
+0 15 18 160153
+0 15 18 160226
+0 15 18 161089
+0 15 18 161140
+0 15 18 162306
+0 15 19 162408
+0 15 19 162666
+0 15 19 162706
+0 15 19 162707
+0 15 19 162726
+0 15 19 164224
+0 15 19 164405
+0 15 19 164434
+0 15 19 164488
+0 15 19 164566
+0 15 19 164568
+0 15 19 164615
+0 15 19 164702
+0 15 19 164830
+0 15 19 164917
+0 15 19 165017
+0 15 19 165526
+0 15 19 166446
+0 15 19 166508
+0 15 19 166577
+0 15 19 166732
+0 15 19 166735
+0 15 19 166736
+0 15 19 166743
+0 15 19 166849
+0 15 19 166969
+0 15 19 167106
+0 15 19 167121
+0 15 19 167389
+0 15 19 168136
+0 15 19 168731
+0 15 19 168772
+0 15 19 168942
+0 15 19 168946
+0 15 19 168958
+0 15 19 169059
+0 15 19 169109
+0 15 19 169456
+0 15 19 169546
+0 15 20 169684
+0 15 20 169964
+0 15 20 170224
+0 15 20 170485
+0 15 20 170683
+0 15 20 172304
+0 15 20 172574
+0 15 20 172961
+0 15 20 173391
+0 15 20 174003
+0 15 20 174037
+0 15 20 174086
+0 15 20 174103
+0 15 20 174177
+0 15 20 174264
+0 15 20 174308
+0 15 20 174340
+0 15 20 174480
+0 15 20 174491
+0 15 20 174500
+0 15 20 174505
+0 15 20 174529
+0 15 20 174541
+0 15 20 174554
+0 15 20 174575
+0 15 20 174742
+0 15 20 174771
+0 15 20 174775
+0 15 20 174785
+0 15 20 174795
+0 15 20 174799
+0 15 20 174839
+0 15 20 174857
+0 15 20 174867
+0 15 20 174877
+0 15 20 174878
+0 15 20 174892
+0 15 20 174933
+0 15 20 174942
+0 15 20 174946
+0 15 20 174959
+0 15 20 174980
+0 15 20 174983
+0 15 20 174989
+0 15 20 175016
+0 15 20 175054
+0 15 20 175061
+0 15 20 175069
+0 15 20 175101
+0 15 20 175103
+0 15 20 175132
+0 15 20 175134
+0 15 20 175139
+0 15 20 175140
+0 15 20 175181
+0 15 20 175182
+0 15 20 175212
+0 15 20 175232
+0 15 20 175242
+0 15 20 175243
+0 15 20 175260
+0 15 20 175291
+0 15 20 175304
+0 15 20 175317
+0 15 20 175339
+0 15 20 175345
+0 15 20 175348
+0 15 20 175355
+0 15 20 175364
+0 15 20 175375
+0 15 20 175384
+0 15 20 175387
+0 15 20 175389
+0 15 20 175398
+0 15 20 175420
+0 15 20 175422
+0 15 20 175430
+0 15 20 175444
+0 15 20 175445
+0 15 20 175471
+0 15 20 175529
+0 15 20 175627
+0 15 20 175634
+0 15 20 175645
+0 15 20 175658
+0 15 20 175709
+0 15 20 175710
+0 15 20 175732
+0 15 20 175735
+0 15 20 175757
+0 15 20 175766
+0 15 20 175780
+0 15 20 175786
+0 15 20 175800
+0 15 20 175801
+0 15 20 175890
+0 15 20 175891
+0 15 20 175893
+0 15 20 175902
+0 15 20 175912
+0 15 20 176015
+0 15 20 176066
+0 15 20 176070
+0 15 20 176088
+0 15 20 176107
+0 15 20 176132
+0 15 20 176133
+0 15 20 176170
+0 15 20 176233
+0 15 20 176234
+0 15 20 176238
+0 15 20 176241
+0 15 20 176266
+0 15 20 176331
+0 15 20 176345
+0 15 20 176440
+0 15 20 176460
+0 15 21 177069
+0 15 21 177473
+0 15 21 177561
+0 15 21 177646
+0 15 21 178858
+0 15 21 179464
+0 15 21 179465
+0 15 21 179554
+0 15 21 179726
+0 15 21 179754
+0 15 21 180661
+0 15 21 180759
+0 15 21 180765
+0 15 21 180866
+0 15 21 180887
+0 15 21 180894
+0 15 21 180895
+0 15 21 180905
+0 15 21 180978
+0 15 21 181053
+0 15 21 181177
+0 15 21 181379
+0 15 21 181426
+0 15 21 181427
+0 15 21 181428
+0 15 21 181556
+0 15 21 181611
+0 15 21 181655
+0 15 21 182045
+0 15 21 182249
+0 15 21 182302
+0 15 21 182319
+0 15 21 182517
+0 15 21 182556
+0 15 21 182575
+0 15 21 182626
+0 15 21 182674
+0 15 21 182726
+0 15 21 182728
+0 15 21 182738
+0 15 21 182881
+0 15 21 182897
+0 15 21 182905
+0 15 21 183086
+0 15 21 183120
+0 15 21 183128
+0 15 21 183167
+0 15 21 183168
+0 15 21 183238
+0 15 21 183247
+0 15 21 183248
+0 15 21 183288
+0 15 21 183307
+0 15 21 183331
+0 15 21 183336
+0 15 21 183346
+0 15 21 183351
+0 15 21 183366
+0 15 21 183417
+0 15 21 183435
+0 15 21 183460
+0 15 21 183466
+0 15 21 183498
+0 15 21 183500
+0 15 21 183534
+0 15 21 183600
+0 15 21 183644
+0 15 21 183677
+0 15 21 183758
+0 15 21 183759
+0 15 21 183832
+0 15 21 183845
+0 15 21 183865
+0 15 21 183925
+0 15 21 183952
+0 15 22 185057
+0 15 22 185114
+0 15 22 185183
+0 15 22 185437
+0 15 22 186498
+0 15 22 186675
+0 15 22 186783
+0 15 22 187131
+0 15 22 187192
+0 15 22 187294
+0 15 22 187321
+0 15 22 187333
+0 15 22 187374
+0 15 22 187398
+0 15 22 187400
+0 15 22 187412
+0 15 22 187431
+0 15 22 187444
+0 15 22 187452
+0 15 22 187461
+0 15 22 187462
+0 15 22 187469
+0 15 22 187495
+0 15 22 187533
+0 15 22 187557
+0 15 22 187624
+0 15 22 187630
+0 15 22 187756
+0 15 22 187770
+0 15 22 187925
+1 16 659270 662033
+1 17 662033 662704
+1 18 662704 663468
+1 19 663468 664212
+1 20 664212 664266
+1 21 664266 664266
+1 22 664266 668789
+1 23 668789 677555
+1 24 677555 677752
+1 25 677752 681827
+1 26 681827 682936
+1 27 682936 683791
+1 28 683791 687244
+1 29 687244 687637
+1 30 687637 687782
+1 31 687782 687802
+1 32 687802 687829
+1 33 687829 688190
+1 34 688190 690006
+1 35 690006 691766
+2 17 662033 662704
+2 18 662704 663468
+2 19 663468 664212
+2 20 664212 664266
+2 21 664266 664266
+2 22 664266 668789
+2 23 668789 677555
+2 24 677555 677752
+2 25 677752 681827
+2 26 681827 682936
+2 27 682936 683791
+2 28 683791 687244
+2 29 687244 687637
+2 30 687637 687782
+2 31 687782 687802
+2 32 687802 687829
+2 33 687829 688190
+2 34 688190 690006
+2 35 690006 691766
+2 36 691766 691983
+3 18 662704 663468
+3 19 663468 664212
+3 20 664212 664266
+3 21 664266 664266
+3 22 664266 668789
+3 23 668789 677555
+3 24 677555 677752
+3 25 677752 681827
+3 26 681827 682936
+3 27 682936 683791
+3 28 683791 687244
+3 29 687244 687637
+3 30 687637 687782
+3 31 687782 687802
+3 32 687802 687829
+3 33 687829 688190
+3 34 688190 690006
+3 35 690006 691766
+3 36 691766 691983
+3 37 691983 692664
+4 19 663468 664212
+4 20 664212 664266
+4 21 664266 664266
+4 22 664266 668789
+4 23 668789 677555
+4 24 677555 677752
+4 25 677752 681827
+4 26 681827 682936
+4 27 682936 683791
+4 28 683791 687244
+4 29 687244 687637
+4 30 687637 687782
+4 31 687782 687802
+4 32 687802 687829
+4 33 687829 688190
+4 34 688190 690006
+4 35 690006 691766
+4 36 691766 691983
+4 37 691983 692664
+4 38 692664 697673
+5 20 664212 664266
+5 21 664266 664266
+5 22 664266 668789
+5 23 668789 677555
+5 24 677555 677752
+5 25 677752 681827
+5 26 681827 682936
+5 27 682936 683791
+5 28 683791 687244
+5 29 687244 687637
+5 30 687637 687782
+5 31 687782 687802
+5 32 687802 687829
+5 33 687829 688190
+5 34 688190 690006
+5 35 690006 691766
+5 36 691766 691983
+5 37 691983 692664
+5 38 692664 697673
+5 39 697673 698837
+6 21 664266 664266
+6 22 664266 668789
+6 23 668789 677555
+6 24 677555 677752
+6 25 677752 681827
+6 26 681827 682936
+6 27 682936 683791
+6 28 683791 687244
+6 29 687244 687637
+6 30 687637 687782
+6 31 687782 687802
+6 32 687802 687829
+6 33 687829 688190
+6 34 688190 690006
+6 35 690006 691766
+6 36 691766 691983
+6 37 691983 692664
+6 38 692664 697673
+6 39 697673 698837
+6 40 698837 702199
+7 22 664266 668789
+7 23 668789 677555
+7 24 677555 677752
+7 25 677752 681827
+7 26 681827 682936
+7 27 682936 683791
+7 28 683791 687244
+7 29 687244 687637
+7 30 687637 687782
+7 31 687782 687802
+7 32 687802 687829
+7 33 687829 688190
+7 34 688190 690006
+7 35 690006 691766
+7 36 691766 691983
+7 37 691983 692664
+7 38 692664 697673
+7 39 697673 698837
+7 40 698837 702199
+7 41 702199 705421
+8 23 668789 677555
+8 24 677555 677752
+8 25 677752 681827
+8 26 681827 682936
+8 27 682936 683791
+8 28 683791 687244
+8 29 687244 687637
+8 30 687637 687782
+8 31 687782 687802
+8 32 687802 687829
+8 33 687829 688190
+8 34 688190 690006
+8 35 690006 691766
+8 36 691766 691983
+8 37 691983 692664
+8 38 692664 697673
+8 39 697673 698837
+8 40 698837 702199
+8 41 702199 705421
+8 42 705421 705553
+9 24 677555 677752
+9 25 677752 681827
+9 26 681827 682936
+9 27 682936 683791
+9 28 683791 687244
+9 29 687244 687637
+9 30 687637 687782
+9 31 687782 687802
+9 32 687802 687829
+9 33 687829 688190
+9 34 688190 690006
+9 35 690006 691766
+9 36 691766 691983
+9 37 691983 692664
+9 38 692664 697673
+9 39 697673 698837
+9 40 698837 702199
+9 41 702199 705421
+9 42 705421 705553
+9 43 705553 705610
+10 25 677752 681827
+10 26 681827 682936
+10 27 682936 683791
+10 28 683791 687244
+10 29 687244 687637
+10 30 687637 687782
+10 31 687782 687802
+10 32 687802 687829
+10 33 687829 688190
+10 34 688190 690006
+10 35 690006 691766
+10 36 691766 691983
+10 37 691983 692664
+10 38 692664 697673
+10 39 697673 698837
+10 40 698837 702199
+10 41 702199 705421
+10 42 705421 705553
+10 43 705553 705610
+10 44 705610 705760
+11 26 681827 682936
+11 27 682936 683791
+11 28 683791 687244
+11 29 687244 687637
+11 30 687637 687782
+11 31 687782 687802
+11 32 687802 687829
+11 33 687829 688190
+11 34 688190 690006
+11 35 690006 691766
+11 36 691766 691983
+11 37 691983 692664
+11 38 692664 697673
+11 39 697673 698837
+11 40 698837 702199
+11 41 702199 705421
+11 42 705421 705553
+11 43 705553 705610
+11 44 705610 705760
+11 45 705760 706317
+12 27 682936 683791
+12 28 683791 687244
+12 29 687244 687637
+12 30 687637 687782
+12 31 687782 687802
+12 32 687802 687829
+12 33 687829 688190
+12 34 688190 690006
+12 35 690006 691766
+12 36 691766 691983
+12 37 691983 692664
+12 38 692664 697673
+12 39 697673 698837
+12 40 698837 702199
+12 41 702199 705421
+12 42 705421 705553
+12 43 705553 705610
+12 44 705610 705760
+12 45 705760 706317
+12 46 706317 706618
+13 28 683791 687244
+13 29 687244 687637
+13 30 687637 687782
+13 31 687782 687802
+13 32 687802 687829
+13 33 687829 688190
+13 34 688190 690006
+13 35 690006 691766
+13 36 691766 691983
+13 37 691983 692664
+13 38 692664 697673
+13 39 697673 698837
+13 40 698837 702199
+13 41 702199 705421
+13 42 705421 705553
+13 43 705553 705610
+13 44 705610 705760
+13 45 705760 706317
+13 46 706317 706618
+13 47 706618 707031
+14 29 687244 687637
+14 30 687637 687782
+14 31 687782 687802
+14 32 687802 687829
+14 33 687829 688190
+14 34 688190 690006
+14 35 690006 691766
+14 36 691766 691983
+14 37 691983 692664
+14 38 692664 697673
+14 39 697673 698837
+14 40 698837 702199
+14 41 702199 705421
+14 42 705421 705553
+14 43 705553 705610
+14 44 705610 705760
+14 45 705760 706317
+14 46 706317 706618
+14 47 706618 707031
+14 48 707031 707358
+15 30 687637 687782
+15 31 687782 687802
+15 32 687802 687829
+15 33 687829 688190
+15 34 688190 690006
+15 35 690006 691766
+15 36 691766 691983
+15 37 691983 692664
+15 38 692664 697673
+15 39 697673 698837
+15 40 698837 702199
+15 41 702199 705421
+15 42 705421 705553
+15 43 705553 705610
+15 44 705610 705760
+15 45 705760 706317
+15 46 706317 706618
+15 47 706618 707031
+15 48 707031 707358
+15 49 707358 707377
+16 31 687782 687802
+16 32 687802 687829
+16 33 687829 688190
+16 34 688190 690006
+16 35 690006 691766
+16 36 691766 691983
+16 37 691983 692664
+16 38 692664 697673
+16 39 697673 698837
+16 40 698837 702199
+16 41 702199 705421
+16 42 705421 705553
+16 43 705553 705610
+16 44 705610 705760
+16 45 705760 706317
+16 46 706317 706618
+16 47 706618 707031
+16 48 707031 707358
+16 49 707358 707377
+16 50 707377 707407
+17 32 687802 687829
+17 33 687829 688190
+17 34 688190 690006
+17 35 690006 691766
+17 36 691766 691983
+17 37 691983 692664
+17 38 692664 697673
+17 39 697673 698837
+17 40 698837 702199
+17 41 702199 705421
+17 42 705421 705553
+17 43 705553 705610
+17 44 705610 705760
+17 45 705760 706317
+17 46 706317 706618
+17 47 706618 707031
+17 48 707031 707358
+17 49 707358 707377
+17 50 707377 707407
+17 51 707407 707408
+18 33 687829 688190
+18 34 688190 690006
+18 35 690006 691766
+18 36 691766 691983
+18 37 691983 692664
+18 38 692664 697673
+18 39 697673 698837
+18 40 698837 702199
+18 41 702199 705421
+18 42 705421 705553
+18 43 705553 705610
+18 44 705610 705760
+18 45 705760 706317
+18 46 706317 706618
+18 47 706618 707031
+18 48 707031 707358
+18 49 707358 707377
+18 50 707377 707407
+18 51 707407 707408
+18 52 707408 708437
+19 34 688190 690006
+19 35 690006 691766
+19 36 691766 691983
+19 37 691983 692664
+19 38 692664 697673
+19 39 697673 698837
+19 40 698837 702199
+19 41 702199 705421
+19 42 705421 705553
+19 43 705553 705610
+19 44 705610 705760
+19 45 705760 706317
+19 46 706317 706618
+19 47 706618 707031
+19 48 707031 707358
+19 49 707358 707377
+19 50 707377 707407
+19 51 707407 707408
+19 52 707408 708437
+19 53 708437 708549
+20 35 690006 691766
+20 36 691766 691983
+20 37 691983 692664
+20 38 692664 697673
+20 39 697673 698837
+20 40 698837 702199
+20 41 702199 705421
+20 42 705421 705553
+20 43 705553 705610
+20 44 705610 705760
+20 45 705760 706317
+20 46 706317 706618
+20 47 706618 707031
+20 48 707031 707358
+20 49 707358 707377
+20 50 707377 707407
+20 51 707407 707408
+20 52 707408 708437
+20 53 708437 708549
+20 54 708549 708561
+21 45 705760 706317
+21 46 706317 706618
+21 47 706618 707031
+21 48 707031 707358
+21 49 707358 707377
+21 50 707377 707407
+21 51 707407 707408
+21 52 707408 708437
+21 53 708437 708549
+21 54 708549 708561
+21 55 708561 708708
+21 56 708708 708843
+21 57 708843 708867
+21 58 708867 708966
+21 59 708966 709062
+21 60 709062 709318
+21 61 709318 709326
+21 62 709326 709346
+21 63 709346 709383
+21 64 709383 709473
+22 55 708561 708708
+22 56 708708 708843
+22 57 708843 708867
+22 58 708867 708966
+22 59 708966 709062
+22 60 709062 709318
+22 61 709318 709326
+22 62 709326 709346
+22 63 709346 709383
+22 64 709383 709473
+22 65 709473 709528
+22 66 709528 709594
+22 67 709594 709632
+22 68 709632 709642
+22 69 709642 709674
+22 70 709674 709689
+22 71 709689 710695
+22 72 710695 710990
+22 73 710990 711273
+22 74 711273 711273
+23 65 709473 709528
+23 66 709528 709594
+23 67 709594 709632
+23 68 709632 709642
+23 69 709642 709674
+23 70 709674 709689
+23 71 709689 710695
+23 72 710695 710990
+23 73 710990 711273
+23 74 711273 711273
+23 75 711273 712174
+23 76 712174 712328
+23 77 712328 717338
+23 78 717338 721358
+23 79 721358 721626
+23 80 721626 722787
+23 81 722787 723268
+23 82 723268 723712
+23 83 723712 723839
+23 84 723839 725406
+24 75 711273 712174
+24 76 712174 712328
+24 77 712328 717338
+24 78 717338 721358
+24 79 721358 721626
+24 80 721626 722787
+24 81 722787 723268
+24 82 723268 723712
+24 83 723712 723839
+24 84 723839 725406
+24 85 725406 726452
+24 86 726452 728466
+24 87 728466 728799
+24 88 728799 729663
+24 89 729663 729697
+24 90 729697 730027
+24 91 730027 730087
+24 92 730087 730566
+24 93 730566 730818
+24 94 730818 730866
+#+end_example
+
+#+NAME: R-sdiff-function
+#+BEGIN_SRC R
+      tmp_body <- paste(
+        '
+    <<cl-input-ptrs>>',
+        '
+    <<cl-tab-group>>',
+        '
+    <<call-cl-rolling-diff>>',
+        '
+    <<cl-unprotect>>',
+        "return(sdiff);\n",
+        collapse="\n")
+  test_rolling_diff <-
+    cfunction(
+      signature(chromoSts="integer",
+                chromoEnds="integer",
+                strt="integer",
+                grp="integer",
+                kvals="integer"),
+      tmp_body,
+      includes =
+      '
+  <<cl-headers>>',
+      otherdefs=
+      '
+  <<function-cl-rolling-diff>>'
+      ) 
+        
+#+END_SRC
+
+#+RESULTS: R-sdiff-function
+
+#+NAME: 
+#+BEGIN_SRC R
+res <- test_rolling_diff(as.integer(chr.starts),
+                     as.integer(chr.ends),
+                     as.integer(st1),
+                     as.integer(al1),
+                     as.integer(c(15,25,35,45,55)))
+           
+#+END_SRC
+
+#+RESULTS:
+
+
+
+**** filter sdiff
+
+
+#+NAME: c-sdiff-funs
+#+BEGIN_SRC c
+<<cl-input-ptrs>>
+<<cl-tab-group>>
+<<cl-rolling-diff>>
+<<cl-sdiff-cutpt>>
+<<cl-unprotect>>
+#+END_SRC
+
+
+#+NAME: R-sdiff-cutpt
+#+BEGIN_SRC R
+  tmp_body <-
+    paste(
+      '
+  <<c-sdiff-funs>>',
+      "return(sdiff);\n",collapse="\n")
+  
+  test_filter_sdiff <-
+    cfunction(
+      signature(chromoSts="integer",
+                chromoEnds="integer",
+                strt="integer",
+                grp="integer",
+                kvals="integer",
+                cutptExprs="call",
+                tmpEnv="environment"),
+      tmp_body,
+      includes =
+      '
+  <<cl-headers>>'
+      ) 
+        
+#+END_SRC
+
+#+RESULTS: R-sdiff-cutpt
+
+
+
+
+#+NAME: 
+#+BEGIN_SRC R
+  res <-
+    test_filter_sdiff(
+      as.integer(chr.starts),
+      as.integer(chr.ends),
+      as.integer(st1),
+      as.integer(al1),
+      as.integer(c(15,25,35,45,55)),
+      cutptExprs=quote(apply(x,2,median,na.rm=TRUE)),
+                  tmpEnv=new.env())
+  
+#+END_SRC
+
+#+RESULTS:
+
+
+
+**** language
+
+#+NAME: 
+#+BEGIN_SRC R
+    tmp_body <-paste(
+'
+  <<cl-demo-language>>',
+collapse="\n")
+
+    test_median_sdiff <-
+    cfunction(
+      signature(myexpr="call",sdiff="integer",rho="environment"),
+      tmp_body,
+      includes=
+      '
+  <<cl-headers>>'
+      )
+#+END_SRC
+
+#+RESULTS:
+
+
+
+**** count sites by group in kvals windows
+
+
+#+NAME: c-kcount-body
+#+BEGIN_SRC c
+<<cl-input-ptrs>>
+<<cl-tab-group>>
+<<cl-rolling-diff>>
+<<cl-sdiff-cutpt>>
+<<call-kval-counts>>
+<<cl-unprotect>>
+#+END_SRC
+
+
+#+NAME: c-kcount-otherdefs
+#+BEGIN_SRC c
+<<function-cl-kval-counts>>
+#+END_SRC
+
+#+NAME: R-kcount
+#+BEGIN_SRC R
+  tmp_body <-
+    paste(
+      '
+  <<c-kcount-body>>',
+      "return(kcounts);\n",collapse="\n")
+  
+  test_kcount <-
+    cfunction(
+      signature(chromoSts="integer",
+                chromoEnds="integer",
+                strt="integer",
+                grp="integer",
+                kvals="integer",
+                cutptExprs="call",
+                tmpEnv="environment"),
+      tmp_body,
+      includes =
+      '
+  <<cl-headers>>',
+  otherdefs=
+      '
+<<c-kcount-otherdefs>>'
+      ) 
+        
+#+END_SRC
+
+#+RESULTS: R-kcount
+
+#+BEGIN_SRC R
+  res <-
+    test_kcount(
+      as.integer(chr.starts),
+      as.integer(chr.ends),
+      as.integer(st1),
+      as.integer(al1),
+      as.integer(c(15,25,35,45,55)),
+      cutptExprs=quote(apply(x,2,median,na.rm=TRUE)),
+                  tmpEnv=new.env())
+  
+#+END_SRC
+
+#+RESULTS:
+
+
+**** the code
+
+
+***** header and otherdefs
+
+#+BEGIN_SRC sh  :session none 
+echo '
+<<grx-headers>>
+/* end of fheaders */
+<<grx-otherdefs>>'
+#+END_SRC
+
+#+RESULTS:
+
+
+*** compile and run
+**** compile
+     :PROPERTIES:
+     :CUSTOM_ID: cfunction-call-to-compile-inline
+     :END:
+
+#+NAME: R-compile
+#+BEGIN_SRC R
+  require(inline)
+    tmp_body <-
+     '
+   <<grx-body>>'  
+    grx_clust_Call <-
+      cfunction(
+        signature(chromoSts="integer",
+                  chromoEnds="integer",
+                  strt="integer",
+                  grp="integer",
+                  kvals="integer",
+                  cutptExprs="call",
+                  cutptFunExprs="call",
+                  tmpEnv="environment",
+                  nperm="integer",
+                  sample_id="integer",
+                  sample_tab="integer"),
+        tmp_body,
+        includes =
+        '
+  <<grx-includes>>',
+    otherdefs=
+        '
+  <<grx-otherdefs>>',
+        verbose=TRUE,
+  language="C"
+        ) 
+          
+#+END_SRC
+
+#+RESULTS: R-compile
+
+**** run full 
+
+
+#+NAME: grx-test-full
+#+BEGIN_SRC R
+  res <-
+    grx_clust_Call(
+      as.integer(chr.starts),
+      as.integer(chr.ends),
+      as.integer(st1),
+      as.integer(al1),
+      as.integer(c(15:35,45,55,65,75)),
+      cutptExprs=quote(apply(x,2,median,na.rm=TRUE)),
+      cutptFunExprs=quote(cutpt.threshhold.val(ccnt,k,n,val=5)),
+      tmpEnv=new.env(),
+      nperm=2L)
+  
+  names(res) <-
+    c("kcounts", "ct", "cutptFunRes", "depth", "cluster_id",
+      "sitewise_best", "cluster_best", "summary_matrix", "sdiff",
+      "cutptSdiff")
+  
+#+END_SRC
+
+#+RESULTS: grx-test-full
+
+#+BEGIN_SRC R
+  rawGeneRx <-
+      function(object, starts, group, kvals, nperm=0L,
+               pruneFun=prune.loglik, ..., cutpt.filter.expr,
+               cutpt.tail.expr,  tmp.env)
+      {
+          
+          mc <- match.call()
+          
+          if (missing(cutpt.tail.expr)) cutpt.tail.expr <-
+              quote(geneRxCluster:::cutpt.threshhold.binom(ccnt,k,n,val=5))
+          
+          if (missing(cutpt.filter.expr)) cutpt.filter.expr <-
+              quote(as.double(apply(x,2,median,na.rm=TRUE)))
+          
+          if (missing(tmp.env)) tmp.env <- new.env()
+          
+          ## object order checked in .gRxCluster(...)
+          
+          object <- as(object,"Rle")
+          chr.lens <- runLength(object)
+          chr.starts <- head(cumsum(c(1,chr.lens)),-1)
+          names(chr.starts) <- as.character(runValue(object))
+          chr.ends <- cumsum(chr.lens)  
+          
+          
+          chr.starts <-  as.integer(chr.starts)
+          chr.ends   <-  as.integer(chr.ends  )
+          starts     <-  as.integer(starts    )
+          kvals <- as.integer(kvals)
+          
+          ## order of starts must be non-decreasing on each chromo
+          starts.dont.decrease <-
+              function(i) all( diff( starts[chr.starts[i]:chr.ends[i] ] ) >=0 )
+          
+          stopifnot( all(sapply(seq_along(chr.starts), starts.dont.decrease )))
+          
+          ## C code checks is.double( eval( cutpt.filter.expr, tmp.env ) )
+          
+          res <- grx_clust_Call(
+              chr.starts, chr.ends, starts, group, kvals,
+              cutpt.filter.expr,
+              cutpt.tail.expr,
+              tmp.env, nperm)
+          
+          names(res) <-
+              c("kcounts", "ct", "cutptFunRes", "depth", "cluster_id",
+                "sitewise_best", "cluster_best", "summary_matrix", "sdiff",
+                "cutptSdiff")
+          res
+      }
+#+END_SRC
+
+#+RESULTS:
+
+#+NAME: grx_test-full-2
+#+BEGIN_SRC R
+  res <- rawGeneRx(seqn.vals, st.vals, grp.vals, k.cands, nperm=0L,
+                 cutptExprs=quote(rep(Inf,length(k.cands))),
+                 cutptFunExprs=quote(ctpt2))
+    
+  
+  
+#+END_SRC
+
+
+#+RESULTS:
+
+
+**** run test sets
+
+Show the 2 permutation methods are same when sample ids are one-to-a-site:
+
+#+BEGIN_SRC R
+  
+  st1 <- sort(sample(10000,1000))
+  al1 <- rbinom(1000,1,0.5)
+  al1[50:75] <- 1L
+  chr.starts <- seq(1,by=200,length=5)
+  chr.ends <- seq(200,by=200,to=1000)
+  set.seed(12345)
+  
+  res <-
+      grx_clust_Call(
+          as.integer(chr.starts),
+          as.integer(chr.ends),
+          as.integer(st1),
+          as.integer(al1),
+          as.integer(c(15:16)),
+          cutptExprs=quote(as.double(apply(x,2,median,na.rm=TRUE))),
+          cutptFunExprs=quote(critVal.target(k,n,5,x)),
+          tmpEnv=new.env(),
+          nperm=20L,
+          sample_id=integer(0),
+          sample_tab=integer(0))
+  
+  ## now show that samplewise permutstion is the same if the samples are
+  ## one for one with the sites:
+  
+  sample.id <- seq_along(al1)-1
+  sample.tab <- al1
+  
+  set.seed(12345)
+  
+          
+  res2 <-
+      grx_clust_Call(
+          as.integer(chr.starts),
+          as.integer(chr.ends),
+          as.integer(st1),
+          as.integer(al1),
+          as.integer(c(15:16)),
+          cutptExprs=quote(as.double(apply(x,2,median,na.rm=TRUE))),
+          cutptFunExprs=quote(critVal.target(k,n,5,x)),
+          tmpEnv=new.env(),
+          nperm=20L,
+          sample_id=as.integer(sample.id),
+          sample_tab=as.integer(sample.tab))
+  
+  all.equal(res,res2)
+  
+  res3 <-
+      .gRxCluster(
+          as.integer(chr.starts),
+          as.integer(chr.ends),
+          as.integer(st1),
+          as.integer(al1),
+          as.integer(c(15:16)),
+          nperm=20L,
+          cutpt.filter.expr=quote(as.double(apply(x,2,median,na.rm=TRUE))),
+          cutpt.tail.expr=quote(critVal.target(k,n,5,x)),
+          noprune,
+          tmp.env=new.env(),        
+          sample.id=as.integer(sample.id+1),
+          sample.tab=as.integer(sample.tab))
+  
+  res4 <-
+      gRxCluster(
+          as.integer(rep(1:5,each=200)),
+          as.integer(st1),
+          as.integer(al1),
+          as.integer(c(15:16)),
+          nperm=20L,
+          noprune,
+          cutpt.filter.expr=as.double(apply(x,2,median,na.rm=TRUE)),
+          cutpt.tail.expr=critVal.target(k,n,5,x),
+          tmp.env=new.env(),        
+          sample.id=as.integer(sample.id+1),
+          sample.tab=as.integer(sample.tab))
+  
+  res5 <-
+      gRxCluster(
+          as.integer(rep(1:5,each=200)),
+          as.integer(st1),
+          as.integer(al1),
+          as.integer(c(15:16)),
+          nperm=20L,
+          noprune,
+          cutpt.filter.expr=as.double(apply(x,2,median,na.rm=TRUE)),
+          cutpt.tail.expr=critVal.target(k,n,5,x),
+          tmp.env=new.env())
+  
+  
+#+END_SRC
+
+#+RESULTS:
+: [1] TRUE
+
+
+#+BEGIN_SRC R
+  res2 <- mcover.clumps(subset(combo.so,both.ok),
+                       c(15:16),5.0,too.long,
+                       efun=function(x) mcols(x)$expt=="Wang",
+                                    cutpt.threshhold.val)
+  
+  res2c <- mcount.events(subset(combo.so,both.ok),
+                       c(15:16),too.long,
+                       efun=function(x) mcols(x)$expt=="Wang")
+  
+#+END_SRC
+
+#+RESULTS:
+
+#+NAME: 
+#+BEGIN_SRC R
+  sites.in.clusters <- combo.so[both.ok,] %over% res2
+  sic.2 <- res[['cluster_id']]!=0
+  
+  which(!sites.in.clusters&sic.2)
+  
+  length(res2)
+  
+  table(res[['cluster_id']])
+  
+#+END_SRC
+
+
+**** trial setups:
+
+#+BEGIN_SRC R
+  ctsdiff <- c(1.5)
+  starts <- cumsum(rep(1:2,c(50,50)))
+  cstart <- starts[c(1,51)]
+  cend <- starts[c(50,100)]
+  grp <- 1:50 %in% c(1:15,(1:25)*2)
+  grp <- c(grp, !grp)
+#+end_src
+
+#+RESULTS:
+
+Alternates:
+
+#+BEGIN_SRC R
+  grp <- grp[c(25:100,1:24)]
+#+END_SRC
+
+#+RESULTS:
+
+
+#+BEGIN_SRC R
+  starts <- starts[c(25:100,1:24)]
+#+END_SRC
+
+#+RESULTS:
+
+#+begin_src R
+  res2 <-
+    grx_clust_Call(
+      as.integer(cstart),
+      as.integer(cend),
+        as.integer(starts),
+        as.integer( grp ),
+        as.integer(c(15)),
+        cutptExprs=quote(apply(x,2,median,na.rm=TRUE)),
+        cutptFunExprs=quote(cutpt.threshhold.val(ccnt,k,n,val=5)),
+        tmpEnv=new.env(),
+        nperm=1L)
+  
+  names(res2) <-
+      c("kcounts", "ct", "cutptFunRes", "depth", "cluster_id",
+        "sitewise_best", "cluster_best", "summary_matrix", "sdiff",
+        "cutptSdiff")
+    
+  
+  resmat <- do.call(cbind, res2[c(1,2,4,5,6,9)])
+  resmat <- cbind(resmat, starts, grp )
+#+END_SRC
+
+#+RESULTS:
+
+
+**** units tests
+
+
+***** cutptClean
+
+
+****** testing .Call()s
+#+name: unit-test-new-elt-c
+#+BEGIN_SRC c
+  
+  /* need these vars */
+  
+  int *pvj=INTEGER(pv);
+  int *ctj=INTEGER(ct); 
+  int *pr_low=INTEGER(prev_low); 
+  int *pr_hi=INTEGER(prev_hi);
+  int *ct_low=INTEGER(cnt_low);
+  int *ct_hi=INTEGER(cnt_hi); 
+  int *ct_conflict=INTEGER(cnt_conflict);
+  int *j_ptr=INTEGER(jval);
+  int jlen=LENGTH(jval);
+  int kv=INTEGER(kval)[0];
+  
+  /* Rprintf("pvj=%d ctj=%d plow=%d phi=%d pcon=%d clow=%d chi=%d ccon=%d\\n", */
+  /*         *pvj, *ctj, *pr_low,  */
+  /*         *pr_hi,  */
+  /*         *ct_low, *ct_hi, *ct_conflict); */
+     
+  for (int j = 0;j<jlen;j++){
+    /* Rprintf("pv=%d ct=%d jv=%d\\n",*(pvj+j_ptr[j]), *(ctj+j_ptr[j]),j_ptr[j]); */
+  cutptClean_new_elt(pvj+j_ptr[j], ctj+j_ptr[j], pr_low, 
+                     pr_hi, 
+                     ct_low, ct_hi, 
+                     ct_conflict, kv);
+  };
+  /* Rprintf("pvj=%d ctj=%d plow=%d phi=%d pcon=%d clow=%d chi=%d ccon=%d\\n", */
+  /*         *pvj, *ctj, *pr_low,  */
+  /*         *pr_hi,  */
+  /*         *ct_low, *ct_hi, *ct_conflict); */
+     
+  
+  
+#+END_SRC  
+  
+#+name: unit-test-old-elt-c  
+#+begin_src c
+  /* need these vars */
+    
+  int *pvj=INTEGER(pv);
+  int *ctj=INTEGER(ct); 
+  int *pr_low=INTEGER(prev_low); 
+  int *pr_hi=INTEGER(prev_hi);
+  int *ct_low=INTEGER(cnt_low);
+  int *ct_hi=INTEGER(cnt_hi); 
+  int *ct_conflict=INTEGER(cnt_conflict);
+  int kv=INTEGER(kval)[0];
+  int *j_ptr=INTEGER(jval);
+  int jlen=LENGTH(jval);
+  
+  /* Rprintf("%d %d %d %d %d %d %d %d %d\\n", */
+  /*         *(pvj+j), *(ctj+j), *pr_low,  */
+  /*         *pr_hi,  */
+  /*         *ct_low, *ct_hi, *ct_conflict,  */
+  /*         kv); */
+          
+  for (int j=0;j<jlen;j++){
+    /* Rprintf("pv=%d ct=%d jv=%d\\n",*(pvj+j_ptr[j]), *(ctj+j_ptr[j]),j_ptr[j]); */
+    cutptClean_old_elt(pvj+j_ptr[j], ctj+j_ptr[j], pr_low, 
+                       pr_hi,
+                       ct_low, ct_hi, ct_conflict, 
+                       kv);
+   };
+  /* Rprintf("%d %d %d %d %d %d %d %d %d\\n", */
+  /*         *(pvj+j), *(ctj+j), *pr_low,  */
+  /*         *pr_hi, */
+  /*         *ct_low, *ct_hi, *ct_conflict,  */
+  /*         kv); */
+  
+#+end_src
+
+
+#+NAME: unit-test-ctpt-start
+#+BEGIN_SRC R :results output
+  require(inline)
+  ut.newelt <-
+      cfunction(signature(
+          pv = "integer",
+          ct = "integer" ,
+          prev_low = "integer" ,
+          prev_hi = "integer" ,
+          cnt_low =
+          "integer" ,
+          cnt_hi = "integer" ,
+          cnt_conflict = "integer",
+          jval= "integer",
+          kval="integer"),
+                '
+  <<unit-test-new-elt-c>>',
+    otherdefs='
+    <<grx-misc-headers>>
+    <<grx-cutpt-clean-fun>>'
+                )
+#+END_SRC
+
+#+RESULTS: unit-test-ctpt-start
+
+
+#+NAME: unit-test-ctpt-finish
+#+BEGIN_SRC R :results output
+  require(inline)
+  ut.oldelt <-
+      cfunction(signature(
+          pv = "integer",
+          ct = "integer" ,
+          prev_low = "integer" ,
+          prev_hi = "integer" ,
+          cnt_low =
+          "integer" ,
+          cnt_hi = "integer" ,
+          cnt_conflict = "integer",
+          kval="integer",
+          jval="integer"),
+                '
+  <<unit-test-old-elt-c>>',
+    otherdefs='
+    <<grx-misc-headers>>
+    <<grx-cutpt-clean-fun>>'
+                )
+#+END_SRC
+
+#+RESULTS: unit-test-ctpt-finish
+: Loading required package: inline
+
+****** R tests
+
+#+NAME: ut-ctpt-combo-test
+#+BEGIN_SRC R
+    arg.list <- list(
+         pv=rep(0L,20),
+         ct=c(rep(0L,5),rep(1L,5),rep(-1L,5),rep(1L,5)),
+         prev_low=0L,
+         prev_hi=0L,
+         cnt_low=0L,
+         cnt_hi=0L,
+         cnt_conflict=0L,
+        kval=3L)
+  
+  for (j in 0:1) {
+      arg.list$jval <- as.integer(j)
+      suppressWarnings(do.call(ut.newelt,arg.list))
+  }
+  
+  arg.list
+  
+  for (j in 2:19) {
+      arg.list$jval <- as.integer(j)
+      suppressWarnings(do.call(ut.newelt,arg.list))
+      arg.list$jval <- as.integer(j-arg.list$kval+1)
+      suppressWarnings(do.call(ut.oldelt,arg.list))
+       print(rbind(ct=arg.list$ct,pv=arg.list$pv))
+      print(unlist(arg.list[-(1:2)]))
+  }
+  
+  for (j in 20:21){
+      arg.list$jval <- as.integer(j-arg.list$kval+1)
+      suppressWarnings(do.call(ut.oldelt,arg.list))
+      print(rbind(ct=arg.list$ct,pv=arg.list$pv))
+      print(unlist(arg.list[-(1:2)]))
+  }
+      
+#+END_SRC
+
+
+#+NAME: ut-ctpt-longvec
+#+BEGIN_SRC R
+    arg.list <- list(
+        prev_low=0L,
+        prev_hi=0L,
+        cnt_low=0L,
+        cnt_hi=0L,
+        cnt_conflict=0L,
+        kval=3L)
+  
+  ## all combos
+  
+  ct.combo <- as.matrix(cbind(expand.grid(rep(list(-1:1),5)),0L,0L))
+  
+  
+  arg.list$ct <- as.integer(t(ct.combo))
+  arg.list$pv <- rep(0L,length(arg.list$ct))
+  
+  
+  k1 <- (arg.list$kval-1)
+  k2 <- length(arg.list$ct)-1
+  
+  for (j in 0:(k1-1)) {
+      arg.list$jval <- as.integer(j)
+      suppressWarnings(do.call(ut.newelt,arg.list))
+  }
+  
+  for (j in (k1):(k2)) {
+        arg.list$jval <- as.integer(j)
+        suppressWarnings(do.call(ut.newelt,arg.list))
+         arg.list$jval <- as.integer(j-k1)
+        suppressWarnings(do.call(ut.oldelt,arg.list))
+       if (arg.list$cnt_conflict<0||arg.list$cnt_hi<0||arg.list$cnt_low<0) break
+        ##       print(rbind(ct=arg.list$ct,pv=arg.list$pv))
+        ##      print(unlist(arg.list[-(1:2)]))
+    }
+    
+    for (j in k2+0:(k1)){
+        arg.list$jval <- as.integer(j-k1)
+        suppressWarnings(do.call(ut.oldelt,arg.list))
+  ##      print(rbind(ct=arg.list$ct,pv=arg.list$pv))
+  ##      print(unlist(arg.list[-(1:2)]))
+    }
+  
+  ct.res <- t(matrix(arg.list$ct,nr=7))
+  
+  ## position 5
+  
+  
+  confl.12 <- ct.combo[,1]*ct.combo[,2]<0
+  confl.13 <- ct.combo[,1]*ct.combo[,3]<0
+  confl.34 <- ct.combo[,3]*ct.combo[,4]<0
+  confl.35 <- ct.combo[,3]*ct.combo[,5]<0
+  confl.45 <- ct.combo[,4]*ct.combo[,5]<0
+  confl.23 <- ct.combo[,2]*ct.combo[,3]<0
+  confl.24 <- ct.combo[,2]*ct.combo[,4]<0
+  
+  confl.123 <- rowSums(ct.combo[,-1+c(2,2,3)]*ct.combo[,-1+c(3,4,4)]<0)>0
+  confl.234 <- rowSums(ct.combo[,c(2,2,3)]*ct.combo[,c(3,4,4)]<0)>0
+  confl.345 <- rowSums(ct.combo[,1+c(2,2,3)]*ct.combo[,1+c(3,4,4)]<0)>0
+  
+  val2 <- ifelse(confl.12,0,ct.combo[,2])
+  val3 <- ifelse(confl.13|confl.23,0,ct.combo[,3])
+  val4 <- ifelse(confl.24|confl.34,0,ct.combo[,4] ) 
+  val5 <- ifelse(confl.35|confl.45,0,ct.combo[,5] )
+  
+  pos.diag <- function(x) all(diag(x)>0)&all(x-diag(diag(x))==0)
+  
+  pos.diag(table(val5,ct.res[,5]))
+  
+  
+  ## position 4
+  
+  pos.diag( table(ifelse(confl.45,0,sign(val4+val5)),ct.res[,4]))
+  
+  ## position 3
+  
+  
+  pos.diag(table(ifelse(confl.345,0,sign(val3+val4+val5)),ct.res[,3]))
+  
+  
+  ## position 2
+  
+  pos.diag(
+      table(ifelse(confl.234,
+                   0,sign(val2+
+                          ifelse(confl.345,0, val3)+
+                          ifelse(confl.45,0, val4))),
+            ct.res[,2])
+   )
+  
+  ## position 1
+  
+  
+  
+  pos.diag(table(ifelse(confl.123,
+                        0,
+                        sign(ct.combo[,1]+
+                             ifelse(confl.234,0,val2)+
+                             ifelse(confl.345,0,val3))),ct.res[,1])
+           )
+  
+  # position -1
+  
+  pos.diag(table(head(ct.res[,7],-1),ifelse(confl.123,
+                                            0,
+                                            sign(ct.combo[,1]+ 
+                                                 ifelse(confl.234,
+                                                        0,
+                                                        ct.combo[,2])))[-1]))
+  # position -2
+  
+  pos.diag(table(head(ct.res[,6],-1),ifelse(confl.123,0,ct.combo[,1])[-1]))
+  
+#+END_SRC
+
+
+#+NAME: ut-ctpt-pvec
+#+BEGIN_SRC R
+  
+  ## exercise the prior conflicts
+  
+      arg.list <- list(
+          prev_low=0L,
+          prev_hi=0L,
+          cnt_low=0L,
+          cnt_hi=0L,
+          cnt_conflict=0L,
+          kval=3L)
+  ct.combo <- as.matrix(cbind(expand.grid(rep(list(-1:1),3)),0L,0L))
+  arg.list$ct <- as.integer(t(ct.combo))
+  arg.list$pv <- rep(rep(c(0L,9L,0L),c(2,1,2)),length(arg.list$ct)/5)
+  ##arg.list$pv[seq(3,by=5,length=4)] <- as.integer(c(-1:1,9))
+  
+  
+  k1 <- (arg.list$kval-1)
+  k2 <- length(arg.list$ct)-1
+    
+    for (j in 0:(k1-1)) {
+        arg.list$jval <- as.integer(j)
+        suppressWarnings(do.call(ut.newelt,arg.list))
+    }
+    
+    for (j in (k1):(k2)) {
+          arg.list$jval <- as.integer(j)
+          suppressWarnings(do.call(ut.newelt,arg.list))
+           arg.list$jval <- as.integer(j-k1)
+          suppressWarnings(do.call(ut.oldelt,arg.list))
+         if (arg.list$cnt_conflict<0||arg.list$cnt_hi<0||arg.list$cnt_low<0) break
+          ##       print(rbind(ct=arg.list$ct,pv=arg.list$pv))
+          ##      print(unlist(arg.list[-(1:2)]))
+      }
+      
+      for (j in k2+0:(k1)){
+          arg.list$jval <- as.integer(j-k1)
+          suppressWarnings(do.call(ut.oldelt,arg.list))
+    ##      print(rbind(ct=arg.list$ct,pv=arg.list$pv))
+    ##      print(unlist(arg.list[-(1:2)]))
+      }
+    
+    ct.res <- t(matrix(arg.list$ct,nr=5))
+    pv.res <- t(matrix(arg.list$pv,nr=5))
+  
+  
+#+END_SRC
+
+
+***** cutptApply
+#+NAME: unit-test-cutptApply
+#+BEGIN_SRC R
+  require(inline)
+    utfun.cutptApply <-
+      cfunction(signature(cutptFunRes="list",
+                          kcounts="matrix",
+                          ct="matrix",
+                          kvals="integer",
+                          strtn="integer",
+                          kvalsn="integer",
+                          prior_value="integer"),
+                '
+    <<utfun-cutptApply-c>>',
+  otherdefs='
+  <<grx-misc-headers>>
+  <<grx-cutpt-fun>>
+  <<grx-cutpt-clean-fun>>'
+                )     
+#+END_SRC
+
+#+RESULTS: unit-test-cutptApply
+
+
+#+NAME: unit-test-cutptApply-run
+#+BEGIN_SRC R
+  ## run **** new first
+  
+  resct <- utfun.cutptApply(
+    res[[3]],
+    res[[1]],
+    res[[2]],
+    as.integer(c(15:35,45,55,65,75)),
+    as.integer(nrow(res[[1]])),
+    as.integer(25L),
+    integer(nrow(res[[1]])))
+
+#+END_SRC
+
+#+RESULTS: unit-test-cutptApply-run
+
+#+NAME: utfun-cutptApply-c
+#+BEGIN_SRC c
+  
+  int kvals_n = INTEGER(kvalsn)[0];
+                               
+  int strt_n = INTEGER(strtn)[0];
+                             
+  int *kvals_ptr=INTEGER(kvals);
+  
+  int *prior_ptr = INTEGER(prior_value);
+                             
+  cutptApply(  cutptFunRes, kcounts, ct, kvals_ptr,
+               strt_n, kvals_n);
+  return(ct);
+#+END_SRC
+
+#+NAME: ck-fill
+#+BEGIN_SRC R
+  ## after running notes.org:sim.grc.raw
+  if (!exists("k.cands")) load("test.ctptfill.RData")
+  kc <- sim.grc.raw[['kcounts']]
+  ct <- sim.grc.raw[['ct']]*0L
+  
+  resct <- utfun.cutptApply(
+      ctpt2,
+      kc,
+      ct,
+      as.integer(k.cands),
+      as.integer(nrow(kc)),
+      as.integer(length(k.cands)),
+      integer(nrow(kc)))
+  
+  
+  ct.low <- sweep(kc,2,sapply(ctpt2,"[",1),"<")
+  ct.hi <- sweep(kc,2,sapply(ctpt2,"[",2),">=")
+  
+  ct.2 <- ct.hi-ct.low
+  
+  
+  ## find instances in which overlapping windows nullified tails
+  
+  for (i in 1:length(k.cands)){
+      ## find paradoxes:
+      tmp <- which(ct.2[,i]==1 & ct[,i]==0)
+  ## look for explainations (all TRUE):
+      seqk <- 1:(k.cands[i]-1)
+      if (length(tmp)){
+          print(
+              table(ct.2[tmp,i],
+                    0<rowSums(0>sapply(c(-seqk,seqk),function(x) ct.2[tmp+x,i]),na.rm=T)))
+      } else {
+          cat("no paradox")
+      }
+  }
+  for (i in 1:length(k.cands)){
+      ## find paradoxes:
+      tmp <- which(ct.2[,i]==-1 & ct[,i]==0)
+  ## look for explainations (all TRUE):
+      seqk <- 1:(k.cands[i]-1)
+      if (length(tmp)){
+          print(
+              table(ct.2[tmp,i],
+                    0<rowSums(0<sapply(c(-seqk,seqk),function(x) ct.2[tmp+x,i]),na.rm=T)))
+      } else {
+          cat("no paradox")
+      }
+  }
+  
+  
+  sapply(1:length(k.cands), function(i) length(which(ct.2[,i]==-1 & ct[,i]==1)))
+  sapply(1:length(k.cands), function(i) length(which(ct.2[,i]==1 & ct[,i]==-1)))
+  
+  
+  
+   hi <- 0
+  low <- 0
+  confl <- 0
+  
+  ## I think this is the right logic 0 still needs to handle aging final elts
+  
+  for (i in 23:length(tmp)){
+      if (tmp[i]!=0){ ## new elt in a tail
+          if (tmp[i]==1){ ## upper
+              hi <- hi+1
+              if (low>0) confl <- if (confl==0) low+hi else confl+1
+          } else { ## lower
+              low <- low + 1
+              if (hi>0) confl <- if (confl==0) low+hi else confl+1
+          }}
+      if (tmp[i-22]!=0){ #elder elt in a tail
+          if (tmp[i-22]>0){ #upper
+              hi <- hi-1
+          } else { # lower
+              low <- low-1
+          }
+          if (confl>0){ #conflict - no fill
+              tmp[i-22] <- 0
+              confl <- confl-1
+          } else {      # no conflict - fill!          
+              tmp[i-22-(1:22)] <- tmp[i-22]
+          }
+      }}
+  
+  
+      c(i,hi,low,confl,ct[i,3])
+  
+  
+  select.elts <- c(1:(k.cands[36]-1),1153845+-(k.cands[36]):k.cands[36])
+  
+  select.elts <- c(1:(k.cands[36]-1),37009+-(k.cands[36]):k.cands[36]) 
+  
+   kc <- sim.grc.raw[['kcounts']][select.elts,36,drop=F]
+   ct <- sim.grc.raw[['ct']][select.elts,36,drop=F]*0L
+  
+   kc <- sim.grc.raw[['kcounts']][,36,drop=F]
+   ct <- sim.grc.raw[['ct']][,36,drop=F]*0L
+  
+    resct <- utfun.cutptApply(
+        ctpt2[36],
+        kc,
+        ct,
+        as.integer(k.cands[36]),
+        as.integer(nrow(kc)),
+        as.integer(length(k.cands[36])),
+        integer(nrow(kc)))
+  
+  ## cbind(resct,kc,kc<ctpt2[[36]][1],kc>=ctpt2[[36]][2])
+  
+  ct.low <- kc<ctpt2[[36]][1]
+  ct.hi <- kc>=ctpt2[[36]][2]
+  
+  cbind(1:length(resct),resct,kc,ct.low,ct.hi)[ 1153845 + (-50):55,]
+  
+#+END_SRC
+
+#+begin_src R
+  kc <- sim.grc.raw[['kcounts']]
+  ct <- sim.grc.raw[['ct']]*0L
+    
+  resct <- utfun.cutptApply(
+      ctpt2,
+      kc,
+      ct,
+      as.integer(k.cands),
+      as.integer(nrow(kc)),
+      as.integer(length(k.cands)),
+      integer(nrow(kc)))
+    
+    ct.low <- sweep(kc,2,sapply(ctpt2,"[",1),"<")
+    ct.hi <- sweep(kc,2,sapply(ctpt2,"[",2),">=")
+  
+    ct.2 <- ct.hi-ct.low
+  
+#+end_src
+
+
+
+
+*** create package src and R
+    :PROPERTIES:
+    :CUSTOM_ID: createSrcR
+    :END:
+
+make src/ and R/ if needed and put cluster C code and R .Call in them
+
+
+#+NAME: R-src-dir
+#+BEGIN_SRC R 
+  pkgName <- "geneRxCluster"
+  dir.create(file.path(pkgName,"src"),showWarnings=FALSE,recursive=TRUE)
+  dir.create(file.path(pkgName,"inst","unitTests"),showWarnings=FALSE,recursive=TRUE)
+  dir.create(file.path(pkgName,"vignettes"),showWarnings=FALSE,recursive=TRUE)
+  dir.create(file.path(pkgName,"tests"),showWarnings=FALSE,recursive=TRUE)
+  
+  unlink(file.path(pkgName,"src","*"))
+  if (!exists("grx_clust_Call")){
+  <<R-compile>>
+      }
+  grx_call_sig <- get("sig",environment(grx_clust_Call@.Data))
+  tfile <- names(grx_call_sig)
+  grx_call_code <- strsplit(grx_clust_Call@code,"\n")[[1]]
+  
+  ### more readable C entry point:
+  C_prefix <- "gRxC_"
+  C_fun_name <- paste0(C_prefix,"cluster")
+  grx_call_code <- sub( tfile, C_fun_name, grx_call_code)
+  
+  writeLines(grx_call_code,
+             con = file.path( pkgName,"src","cluster.c"))
+  
+  ### more readable R .Call
+  grxc_cluster_call <- function(){}
+  grx_tmp <- body(grx_clust_Call@.Data)
+  grx_tmp[[1]] <- as.name(".Call")
+  grx_tmp[[2]] <- "gRxC_cluster"
+  grx_tmp[["PACKAGE"]] <- pkgName
+  formals(grxc_cluster_call) <- formals(grx_clust_Call@.Data)
+  body(grxc_cluster_call) <- grx_tmp
+  
+  dir.create(file.path(pkgName,"R"),showWarnings=FALSE,recursive=TRUE)
+  
+  ### don't overwrite inline'd version of grx_clust_Call
+  local({ 
+      grx_clust_Call <- grxc_cluster_call;
+      dump("grx_clust_Call",
+       file=file.path(pkgName,"R","grx_clust_Call.R"))
+  })
+  
+#+END_SRC
+
+
+
+*** R utils
+
+**** build ignore files
+
+#+NAME: build-ignore
+#+BEGIN_SRC R :tangle ../geneRxCluster/.Rbuildignore 
+inst/ex-.*.R
+#+END_SRC 
+**** CITATION file
+
+#+NAME: citation-grx
+#+BEGIN_SRC R :tangle ../geneRxCluster/inst/CITATION
+  citHeader("To cite package `geneRxCluster' in publications use:")
+  citEntry(entry = "article",
+      title =        "Comparing {DNA} site clusters with {S}can {S}tatistics",  
+           author = personList(as.person("Charles C. Berry"),
+                               as.person("Karen E. Ocwieja"),
+                               as.person("Nirvav Malani"),
+                               as.person("Frederic D. Bushman")),
+           Journal="Bioinformatics",
+           year = 2014,
+           doi="{10.1093/bioinformatics/btu035}",
+           url="{http://dx.doi.org/10.1093/bioinformatics/btu035}",
+           textVersion =
+           paste0("Berry CC, Ocwieja K, Malani N and Bushman FD.",
+                  "Comparing DNA site clusters with Scan Statistics.",
+                  "Bioinformatics 2014; doi: 10.1093/bioinformatics/btu035"))
+  
+#+END_SRC
+
+#+RESULTS: citation-grx
+[[file:../geneRxCluster/inst/CITATION]]
+
+**** prune loglik
+
+#+NAME: function-R-prune.loglik
+#+begin_src R :tangle ../geneRxCluster/R/Rutils.R
+  ##' best contiguous region
+  ##'
+  ##' prune each end of the region using loglik criterion
+  ##' @title prune.loglik
+  ##' @param x a GRanges object
+  ##' @param p.null the probability of category 1 (FALSE)
+  ##' @details this is to be used as the \code{pruneFun} are of \code{gRxCluster}
+  ##  @return same as \code{\link{gRxCluster}} less the \code{metadata}
+  ##' @seealso \code{\link{gRxCluster-object}} for details on what this
+  ##' function returns.
+  ##' @export
+  ##' @author Charles Berry
+  prune.loglik <- function(x,p.null=0.5)
+  {
+      x.best <- function(x){
+          abs.depth <- abs(x$depth)
+          high.scores <- range(which(abs.depth==max(abs.depth)))
+          GRanges(
+              seqnames = seqnames( x )[ 1 ] ,
+              IRanges(start=start(x)[high.scores[1]],
+                      end=end(x)[high.scores[2]]),
+              depth=x$depth[high.scores[1]],
+              clump.id=x$clump.id[high.scores[1]])
+      }
+      
+      llfun <- function(x,y)
+          ifelse(x>0,x*log(x),0)+ifelse(y>0,y*log(y),0)-(x+y)*log(x+y)
+      llnull <- function(x,y)
+          x*log(p.null)+y*log(1-p.null)
+      
+      
+      x.max <- function(res.elt,x.elt){
+          tmp1 <- subjectHits(findOverlaps(ranges(res.elt),ranges(x.elt)))
+          ##    tmp1 <- subjectHits(findOverlaps((res.elt),(x.elt)))
+          tab <- as.data.frame(mcols(x.elt[,2:3]))
+          ctab <- colSums( tab[ unique(tmp1),] )
+          
+          ltab <- rbind( tab[(1:nrow(tab))<min(tmp1),],
+                        ctab)
+          
+          rtab <- rbind(ctab,
+                        tab[(1:nrow(tab))>max(tmp1),])
+          
+          rtab[["c1"]] <- cumsum(rtab[,1])
+          rtab[["c2"]] <- cumsum(rtab[,2])
+          rtab[["rest1"]] <- rev(cumsum(rev(rtab[,1])))-rtab[,1]
+          rtab[["rest2"]] <- rev(cumsum(rev(rtab[,2])))-rtab[,2]
+          r.llk <- llnull(rtab$rest1, rtab$rest2 ) + llfun(rtab$c1, rtab$c2 )
+          ltab[["c1"]] <- rev(cumsum(rev(ltab[,1])))
+          ltab[["c2"]] <- rev(cumsum(rev(ltab[,2])))
+          ltab[["rest1"]] <- cumsum(ltab[,1])-ltab[,1]
+          ltab[["rest2"]] <- cumsum(ltab[,2])-ltab[,2]
+          l.llk <- llnull(ltab$rest1, ltab$rest2 ) + llfun(ltab$c1, ltab$c2 )
+          l.max.at <- min(which(l.llk==max(l.llk)))
+          r.max.at <- max(tmp1) - 1 + max(which(r.llk==max(r.llk)))
+          res <- GRanges(
+              seqnames = seqnames( x.elt )[ 1 ] ,
+              IRanges(start=start(x.elt)[l.max.at],
+                      end=end(x.elt)[r.max.at]))
+          mcols(res) <-
+              t(as.matrix(c(colSums(tab[l.max.at:r.max.at,]),
+                            clump.id=as.vector(x.elt$clump.id[1]))))
+          
+          res
+      }
+      x <- split(x,x$clump.id)
+      res.list <- lapply(x,x.best)
+      clmp.list <- mapply(x.max,res.list,as.list(x),SIMPLIFY=FALSE)
+      unlist(GRangesList( clmp.list ))
+  }
+  
+     #+end_src
+
+#+RESULTS: function-R-prune.loglik
+
+**** prune nothing
+
+#+NAME: function-noprune
+#+begin_src R :tangle ../geneRxCluster/R/Rutils.R
+  ##' join contiguous windows
+  ##'
+  ##' return all the candidate sites in a clump without pruning
+  ##' @title noprune
+  ##' @param x a GRanges object
+  ##' @param ... currently unused
+  ##' @details this is to be used as the \code{pruneFun} are of \code{gRxCluster}
+  ##' @return same as \code{\link{gRxCluster}} less the \code{metadata}
+  ##' @seealso \code{\link{gRxCluster-object}} for more details on what
+  ##' this function returns.
+  ##' @export
+  ##' @author Charles Berry
+  noprune <-
+      function(x,...){
+          firsts <- which( !duplicated(x$clump.id) )
+          lasts <- which( !duplicated(x$clump.id, fromLast=TRUE ) )
+          sn <- seqnames(x)[firsts]
+          sts <- start(x)[firsts]
+          ends <- end(x)[lasts]
+          vals1 <- tapply(mcols(x)[,2],x$clump.id,sum)
+          vals2 <- tapply(mcols(x)[,3],x$clump.id,sum)
+          id <- x$clump.id[firsts]
+          GRanges(seqnames=sn,
+                  IRanges(start=sts,end=ends),
+                  value1=vals1,
+                  value2=vals2,
+                  clump.id=id)
+      }
+#+END_SRC
+
+#+RESULTS: function-noprune
+
+**** cutptExprs default
+
+#+begin_src R
+quote(apply(x,2,median,na.rm=TRUE))
+#+end_src
+
+**** cutptFunRes default 
+
+
+
+# critVal funs
+
+#+NAME: critVal-funs-simple
+#+BEGIN_SRC R :tangle ../geneRxCluster/R/Rutils.R
+  ##' critical region cutpoints
+  ##'
+  ##' This version uses alpha and will find TFD
+  ##' @title critical regions
+  ##' @param k - window width(s)
+  ##' @param p0 - length 2 probabilities
+  ##' @param alpha - two tailed 
+  ##' @param posdiff - position difference matrix
+  ##' @return list of cutoffs and attributes
+  ##' @seealso \code{\link{gRxCluster}} for how and why this function is used
+  ##' @example inst/ex-critVal-simple.R
+  ##' @author Charles Berry
+  ##' @export
+  critVal.alpha <-
+      function(k,p0,alpha,posdiff){
+          p0 <- prop.table(p0) # safely
+          ns <- colSums(!is.na(posdiff))
+          tails <-
+              mapply(function(kelt,n){
+                  mat <- cbind(
+                      low=pbinom(0:kelt,kelt,p0[2]),
+                      hi=pbinom(-1+0:kelt,kelt,p0[2],lower.tail=F)
+                      )
+                  low_cut <- tail(which(mat[,'low']<alpha/2),1)
+                  high_cut <- head(which(mat[,'hi']<alpha/2),1)
+                  res <- 
+                      c(low= if (length(low_cut)) low_cut else 0,
+                      up= if (length(high_cut)) high_cut-1 else nrow(mat))
+                  mat <- cbind(2*n*mat,mat)
+                  colnames(mat) <- c("target.low","target.hi","low","hi")
+                  attr(res,"fdr") <- mat
+                  attr(res,"target") <- alpha*n
+                  res
+              },k,ns,SIMPLIFY=FALSE)
+          tails}
+  
+#+END_SRC
+
+#+NAME: example-R-critVal-simple
+#+BEGIN_SRC R :tangle ../geneRxCluster/inst/ex-critVal-simple.R
+  # symmetric odds:
+  crit <- critVal.alpha(5:25,c(1,1)/2,alpha=0.05,
+                        matrix(1,nr=50,nc=21))
+  crit[[1]]
+  sapply(crit,c)
+  # 5:1 odds
+  asymmetric.crit <- critVal.alpha(5:25,c(1,5)/6,alpha=0.05,
+                        matrix(1,nr=50,nc=21))
+  # show the critical regions
+  par(mfrow=c(1,2))
+  gRxPlot(crit,method="critical")
+  gRxPlot(asymmetric.crit,method="critical")
+  rm(crit,asymmetric.crit)
+#+END_SRC
+
+
+
+
+#+NAME: critVal-funs-target
+#+BEGIN_SRC R :tangle ../geneRxCluster/R/Rutils.R
+  ##' critical region cutpoints
+  ##'
+  ##' This version uses TFD and will find alpha implicitly
+  ##' @title critical regions
+  ##' @param k  window width(s)
+  ##' @param p0  length 2 probabilities
+  ##' @param target - two tailed 
+  ##' @param posdiff - position difference matrix
+  ##' @param ns the number of windows passing filter at each k
+  ##' @return list of cutoffs and attributes
+  ##' @seealso \code{\link{gRxCluster}} for how and why this function is used
+  ##' @author Charles Berry
+  ##' @example inst/ex-critVal-target.R
+  ##' @export
+  critVal.target <-
+      function(k,p0,target,posdiff=NULL,ns){
+          p0 <- prop.table(p0) # just in case raw counts were passed
+          stopifnot(length(p0)==2)
+          if (!is.null(posdiff)) ns <- colSums(!is.na(posdiff))
+          if (length(k) != length(ns))
+              stop("length(k) must = ncol(posdiff) or length(ns)")
+          tails <-
+              mapply(function(kelt,n){
+                  mat <- cbind(
+                      low=pbinom(0:kelt,kelt,p0[2]),
+                      hi=pbinom(-1+0:kelt,kelt,p0[2],lower.tail=F)
+                      )
+                  low_cut <- tail(which(mat[,'low']<target/n/2),1)
+                  high_cut <- head(which(mat[,'hi']<target/n/2),1)
+                  res <- 
+                      c(low= if (length(low_cut)) low_cut else 0,
+                      up= if (length(high_cut)) high_cut-1 else nrow(mat))
+                  mat <- cbind(2*n*mat,mat)
+                  colnames(mat) <- c("target.low","target.hi","low","hi")
+                  attr(res,"fdr") <- mat
+                  attr(res,"target") <- target 
+                  res
+              },as.list(k),as.list(ns),SIMPLIFY=FALSE)
+          tails}
+  
+#+END_SRC
+
+#+RESULTS: critVal-funs-target
+
+
+#+NAME: example-R-critVal-target
+#+BEGIN_SRC R :tangle ../geneRxCluster/inst/ex-critVal-target.R
+  # symmetric odds:
+  crit <- critVal.target(5:25,c(1,1),1,ns=rep(10,21))
+  crit[[1]]
+  sapply(crit,c)
+  # 5:1 odds
+  asymmetric.crit <- critVal.target(5:25,c(1,5),1,ns=rep(10,21))
+  # show the critical regions
+  par(mfrow=c(1,2))
+  gRxPlot(crit,method="critical")
+  gRxPlot(asymmetric.crit,method="critical")
+  rm(crit,asymmetric.crit)
+#+END_SRC
+
+This one needs to be run in advance to enable filtering to take place.
+
+#+NAME: critVal-funs-pwr
+#+BEGIN_SRC R :tangle ../geneRxCluster/R/Rutils.R
+  ##' critical region cutpoints
+  ##'
+  ##' This version uses power and TFD and will limit windows screened
+  ##' @title critical regions
+  ##' @param k - window width(s)
+  ##' @param p0 - length 2 probabilities
+  ##' @param target - false discoveries wanted
+  ##' @param pwr - desired power
+  ##' @param odds - alternative odds ratio
+  ##'  @return list of cutoffs and attributes
+  ##' @seealso \code{\link{gRxCluster}} for how and why this function is used
+  ##' @example inst/ex-critVal-power.R
+  ##' @author Charles Berry
+  ##' @export
+  critVal.power <-
+    function(k,p0,target,pwr=0.8,odds=7)
+  {     
+      pi.0 <- prop.table(p0)[2]
+      pi.alt <- plogis( qlogis( pi.0 ) + c(-1,1) * log(odds) )
+      ctpts <-
+          as.data.frame(
+              t(matrix(
+                  sapply(1:2,
+                         function(x) (x==1) +
+                         qbinom(1-pwr,k,pi.alt[x],lower.tail=x==2)),
+                  ncol=2)))
+      names(ctpts) <- k
+      target.min <-
+          lapply(k,function(x){
+              y <- dbinom(0:x,x,pi.0)
+              cbind(low=cumsum(y),hi=rev(cumsum(rev(y))))})    
+      alpha <-
+          mapply(function(x,y)
+                 max(abs(pbinom(x-1,y,pi.0)-0:1)),
+                 ctpts,
+                 k)
+      target.nj <- target/alpha/2
+      res <- mapply(function(x,y,z){
+          attr(x,"fdr") <- cbind( target= 2 * y * trunc(z),y )
+          colnames(attr(x,"fdr")) <- c("target.low","target.hi","low","hi")
+          attr(x,"n") <- z
+          attr(x,"target") <- target
+          x},
+                    ctpts,target.min,target.nj,
+                    SIMPLIFY=FALSE)
+      attr(res,"filter.fun") <-
+          function(x) {
+              n <- target.nj
+              sapply(seq_along(n),
+                     function(j) 
+                     quantile(x[,j],
+                              min(n[j]/sum(!is.na(x[,j])),1.0),
+                             na.rm=TRUE))}
+      res
+              
+  }
+      
+#+END_SRC
+
+#+NAME: example-R-critVal-power
+#+BEGIN_SRC R :tangle ../geneRxCluster/inst/ex-critVal-power.R
+  # symmetric odds:
+  crit <-
+      critVal.power(5:25,c(1,1),5,pwr=0.8,odds=7)
+  crit[[1]]
+  sapply(crit,c)
+  # 5:1 odds
+  asymmetric.crit <-
+      critVal.power(5:25,c(1,5),5,pwr=0.8,odds=7)
+  # show the critical regions
+  par(mfrow=c(1,2))
+  gRxPlot(crit,method="critical")
+  gRxPlot(asymmetric.crit,method="critical")
+  rm(crit,asymmetric.crit)  
+#+END_SRC
+
+
+
+#+COMMENT: don't :tangle ../geneRxCluster/R/Rutils.R
+
+#+NAME: cutpt.threshhold.val
+#+BEGIN_SRC R 
+  ##' find cutpoints
+  ##'
+  ##' find cutpoints based on expected number of False Discoveries in
+  ##' each tail
+  ##' @title cutpt.threshhold.val
+  ##' @param ccnt matrix of counts of efun_vals
+  ##' @param k the window widths for each column of ccnt
+  ##' @param n table(efun_vals)
+  ##' @param val the target for expected False Discoveries
+  ##' @return a list
+  ##' @seealso \code{\link{gRxCluster}} for how and why this function is used
+  ##' @author Charles Berry
+  cutpt.threshhold.val <- function(ccnt,k,n,val)
+  {
+    clumps.ok <- colSums(!is.na(ccnt))
+    hyper.prs <-
+      lapply(k, function(ki) {
+        dh <- dhyper(ki:0, n[1], n[2], ki )
+        dim(dh) <- c(1,ki+1)
+        colnames(dh) <- 0:ki
+        dh})
+    clump.tabs <-
+      sapply(seq_along(k),
+             function(i) table(factor(ccnt[,i],0:k[i])),simplify=FALSE)
+    hyper.median.index <- sapply(hyper.prs,
+                            function(x) which(cumsum(x)>=0.5)[1])
+    e.tails <-
+      lapply(hyper.prs,
+             function(hp){
+               lower <- cumsum(hp)
+               upper <- rev(cumsum(rev(hp)))
+               cbind(up=upper,low=lower)})
+  
+    ctv.result <- function(ctab,et){
+      ## ptab <- prop.table(ctab)
+      
+      fdr_low <- sum(ctab)*et[,'low']
+      fdr_up <- sum(ctab)*et[,'up']
+      low_cut <- tail(which(fdr_low<val),1)
+      high_cut <- head(which(fdr_up<val),1)
+      res <- 
+        c(low= if (length(low_cut)) low_cut else 0,
+          up= if (length(high_cut)) high_cut-1 else length(fdr_up))
+      attr(res,"fdr") <- cbind(low=fdr_low,up=fdr_up,tab=ctab,tail.prob=et)
+      res
+    }
+    
+    mapply( ctv.result , clump.tabs,e.tails,SIMPLIFY=FALSE)
+    
+  }
+  
+#+END_SRC
+
+#+RESULTS: cutpt.threshhold.binom
+
+
+#+NAME: cutpt.threshhold.binom
+#+BEGIN_SRC R 
+  ##' find cutpoints
+  ##'
+  ##' find cutpoints based on expected number of False Discoveries in
+  ##' each tail. From gRxCluster, this is called after
+  ##' cutpt.filter.expr, so \code{x} - the sdiff object will be
+  ##' available.
+  ##' @title setup.threshhold.binom
+  ##' @param k    the window widths   
+  ##' @param n    e.g. table(group)                           
+  ##' @param val  maximum one tailed nominal alpha to determine cutpoints
+  ##' @return a list
+  ##' @seealso \code{\link{gRxCluster}} for how and why this function is used
+  ##' @author Charles Berry
+  cutpt.threshhold.binom <-
+      function(k,n,val)
+      {
+          if (val<0.0 || val>1.0) stop("val must be in [0,1]") 
+          p.nought <- prop.table(n)[1]
+          threshhold.binom(k,val,p.nought)
+      }
+  
+#+END_SRC
+
+
+#+NAME: threshhold-binoma
+#+BEGIN_SRC R 
+  ##' find cutpoints utility
+  ##'
+  ##' find cutpoints based on expected number of False Discoveries in
+  ##' each tail. Not for end-user use.
+  ##' @title setup threshhold.binom
+  ##' @param k  window widths 
+  ##' @param val  nominal alpha (length(val) %in% c(1,length(k)))
+  ##' @param p0 null value
+  ##' @return a list
+  ##' @author Charles Berry
+  threshhold.binom <-
+      function(k,val,p0)
+      {
+          ##  ccnt matrix of counts of efun_vals
+          ##  k the window widths for each column of ccnt
+          ##  n table(efun_vals)
+          ##  val the target for alpha
+  
+          if (length(val)==1) val <- rep(val,length(k))
+          stopifnot(length(val)==length(k))
+          
+          bino.prs <-
+              lapply(k, function(ki) {
+                  dh <- dbinom(ki:0, ki, p0 )
+                  dim(dh) <- c(1,ki+1)
+                  colnames(dh) <- 0:ki
+                  dh})
+          bino.median.index <-
+              sapply(bino.prs,
+                     function(x) which(cumsum(x)>=0.5)[1])
+          e.tails <-
+              lapply(bino.prs,
+                     function(hp){
+                         lower <- cumsum(hp)
+                         upper <- rev(cumsum(rev(hp)))
+                         cbind(up=upper,low=lower)})
+          for (i in seq_along(e.tails))
+              attr(e.tails[[i]],"val") <- val[i] 
+          
+          ctv.result <- function(et){
+              
+              fdr_low <- et[,'low']
+              fdr_up <- et[,'up']
+              low_cut <- tail(which(fdr_low < attr(et,"val")),1)
+              high_cut <- head(which(fdr_up < attr(et,"val")),1)
+              res <- 
+                  c(low= if (length(low_cut)) low_cut else 0,
+                    up= if (length(high_cut)) high_cut-1 else length(fdr_up))
+              attr(res,"fdr") <- et[,c("low","up")]
+              attr(res,"val") <- attr(et,"val")
+              res
+          }
+                  
+          lapply( e.tails,ctv.result)
+      }
+  
+  
+#+END_SRC
+
+#+NAME: threshhold.binom.old
+#+BEGIN_SRC R :eval never 
+  ##' find cutpoints
+  ##'
+  ##' find cutpoints based on expected number of False Discoveries in
+  ##' each tail
+  ##' @title setup.threshhold.binom
+  ##' @param k  window widths 
+  ##' @param ksums  number of trials per each width
+  ##' @param val  nominal FD
+  ##' @param p0 null value
+  ##' @return a list
+  ##' @author Charles Berry
+  threshhold.binom <-
+      function(k,ksums,val,p0)
+      {
+          ##  ccnt matrix of counts of efun_vals
+          ##  k the window widths for each column of ccnt
+          ##  n table(efun_vals)
+          ##  val the target for expected False Discoveries
+          
+          bino.prs <-
+              lapply(k, function(ki) {
+                  dh <- dbinom(ki:0, ki, p0 )
+                  dim(dh) <- c(1,ki+1)
+                  colnames(dh) <- 0:ki
+                  dh})
+          bino.median.index <-
+              sapply(bino.prs,
+                     function(x) which(cumsum(x)>=0.5)[1])
+          e.tails <-
+              lapply(bino.prs,
+                     function(hp){
+                         lower <- cumsum(hp)
+                         upper <- rev(cumsum(rev(hp)))
+                         cbind(up=upper,low=lower)})
+          
+          ctv.result <- function(ks,et){
+              
+              fdr_low <- ks*et[,'low']
+              fdr_up <- ks*et[,'up']
+              low_cut <- tail(which(fdr_low<val),1)
+              high_cut <- head(which(fdr_up<val),1)
+              res <- 
+                  c(low= if (length(low_cut)) low_cut else 0,
+                    up= if (length(high_cut)) high_cut-1 else length(fdr_up))
+              attr(res,"fdr") <- cbind(low=fdr_low,up=fdr_up,tail.prob=et)
+              res
+          }
+                  
+          mapply( ctv.result , ksums ,e.tails,SIMPLIFY=FALSE)
+      }
+  
+  
+#+END_SRC
+
+#+RESULTS: threshhold.binom
+
+**** plot cutpoints
+#+NAME: plot-cutpoints-util
+#+BEGIN_SRC R :tangle ../geneRxCluster/R/Rutils.R
+  ##' Plot a set of cutpoints - Utility
+  ##'
+  ##' NOT FOR USERS. Not exported.
+  ##' @title plot.cutpoints
+  ##' @param crit - a cutpoint object see \code{\link{gRxCluster}}
+  ##' @param pi.0 - optional null value to plot
+  ##' @param kvals - which cutpoints to includein the plot
+  ##' @param ... passed to barplot
+  ##' @return list with components of \dQuote{\code{bar.x}} (the value of
+  ##' \code{hist()}), \dQuote{\code{kvals}} (window widths plotted), and
+  ##' \dQuote{\code{pi.0}} (the input value of \code{pi.0})
+  ##' @author Charles Berry
+  plot.cutpoints <-
+      function(crit, pi.0=NULL, kvals=NULL, ...){
+          tmp.k <- 
+              sapply(crit,function(x) nrow(attr(x,"fdr"))-1)
+          both.bars <- apply(rbind(0,sapply(crit,c),1+tmp.k),2,diff)
+          if (!is.null(kvals)){
+              k.indx <- match(kvals,tmp.k)
+              stopifnot(all(is.finite(k.indx)))
+              tmp.k <- tmp.k[k.indx]
+              both.bars <- both.bars[, k.indx, drop=F]
+          }
+  
+          bar.x <- barplot(both.bars,col=c("gray","white","gray"),
+                           xlab=expression("Sites in Window" == w[j]),names.arg=tmp.k,
+                           ...
+                           )
+          if (!is.null(pi.0))
+              points(bar.x,pi.0*tmp.k,pch=19,cex=1.0)
+          invisible(list(bar.x=bar.x,kvals=tmp.k,pi.0=pi.0))
+      }
+  
+#+END_SRC
+
+**** unit tests
+
+- call grx_clust_Call directly
+  1) counts correct 
+  2) cutting OK
+  3) resolving conflicts
+  4) not crossing chromosomes
+  5) depth OK
+
+
+#+NAME: grx-do-Runit
+#+BEGIN_SRC R :tangle ../geneRxCluster/tests/doRunit.R
+  ## unit tests will not be done if RUnit is not available
+  if(require("RUnit", quietly=TRUE)) {
+   
+    ## --- Setup ---
+   
+    pkg <- "geneRxCluster" # <-- Change to package name!
+    if(Sys.getenv("RCMDCHECK") == "FALSE") {
+      ## Path to unit tests for standalone running under Makefile (not R CMD check)
+      ## PKG/tests/../inst/unitTests
+      path <- file.path(getwd(), "..", "inst", "unitTests")
+    } else {
+      ## Path to unit tests for R CMD check
+      ## PKG.Rcheck/tests/../PKG/unitTests
+      path <- system.file(package=pkg, "unitTests")
+    }
+    cat("\nRunning unit tests\n")
+    print(list(pkg=pkg, getwd=getwd(), pathToUnitTests=path))
+   
+    library(package=pkg, character.only=TRUE)
+   
+    ## If desired, load the name space to allow testing of private functions
+    ## if (is.element(pkg, loadedNamespaces()))
+    ##     attach(loadNamespace(pkg), name=paste("namespace", pkg, sep=":"), pos=3)
+    ##
+    ## or simply call PKG:::myPrivateFunction() in tests
+   
+    ## --- Testing ---
+   
+    ## Define tests
+    testSuite <- defineTestSuite(name=paste(pkg, "unit testing"),
+                                            dirs=path)
+    ## Run
+    tests <- runTestSuite(testSuite)
+   
+    ## Default report name
+    pathReport <- file.path(path, "report")
+   
+    ## Report to stdout and text files
+    cat("------------------- UNIT TEST SUMMARY ---------------------\n\n")
+    printTextProtocol(tests, showDetails=FALSE)
+    printTextProtocol(tests, showDetails=FALSE,
+                      fileName=paste(pathReport, "Summary.txt", sep=""))
+    printTextProtocol(tests, showDetails=TRUE,
+                      fileName=paste(pathReport, ".txt", sep=""))
+   
+    ## Report to HTML file
+    printHTMLProtocol(tests, fileName=paste(pathReport, ".html", sep=""))
+   
+    ## Return stop() to cause R CMD check stop in case of
+    ##  - failures i.e. FALSE to unit tests or
+    ##  - errors i.e. R errors
+    tmp <- getErrors(tests)
+    if(tmp$nFail > 0 | tmp$nErr > 0) {
+      stop(paste("\n\nunit testing failed (#test failures: ", tmp$nFail,
+                 ", #R errors: ",  tmp$nErr, ")\n\n", sep=""))
+    }
+  } else {
+    warning("cannot run unit tests -- package RUnit is not available")
+  }
+#+END_SRC
+
+#+name: grx-makefile
+#+BEGIN_SRC makefile :tangle ../geneRxCluster/inst/unitTests/Makefile
+  TOP=../..
+  PKG=${shell cd ${TOP};pwd}
+  SUITE=doRUnit.R
+  R=R
+  
+  all: inst test
+  
+  inst: # Install package
+          cd ${TOP}/..;\
+          ${R} CMD INSTALL ${PKG}
+  
+  test: # Run unit tests
+          export RCMDCHECK=FALSE;\
+          cd ${TOP}/tests;\
+          ${R} --vanilla --slave < ${SUITE}
+  
+#+END_SRC
+
+#+NAME: grx-unit-tests
+#+BEGIN_SRC R :tangle ../geneRxCluster/inst/unitTests/runit.1.R
+  ### --- Test setup ---
+   
+  if(FALSE) {
+    ## Not really needed, but can be handy when writing tests
+    library("RUnit")
+    library("geneRxCluster")
+  }
+   
+  ### --- Test functions ---
+  
+  callCl <- geneRxCluster:::grx_clust_Call
+  
+  res <- callCl(chromoSts=c(1L,11L), chromoEnds=c(10L,20L), strt=as.integer(1:20),
+                grp=as.integer(rep(0:1,each=10)), kvals=c(10L),
+                cutptExprs=rep(Inf,1), 
+                cutptFunExprs=
+                list(structure(as.integer(c(3,8)),
+                               fdr=cbind(low=(0:10)/10,up=(10:0)/10))) ,
+                tmpEnv=new.env(), nperm=0L,
+                integer(0),integer(0)) 
+  
+  names(res) <-
+                c("kcounts", "ct", "cutptFunRes", "depth", "cluster_id",
+                  "sitewise_best", "cluster_best", "summary_matrix", "sdiff",
+                  "cutptSdiff")
+  
+  test_simply_grx_clust_Call <- function(){
+      checkTrue(all(res$kcounts[c(10,20),1]==c(0,10)))
+      checkTrue(all(res$ct==rep(c(-1,1),each=10)))
+      checkTrue(all(res$depth==rep(c(-1,1),each=10)))
+      checkTrue(all(res$cluster_best[[1]] == c(Inf,0,0)))
+      checkTrue(all(res$sdiff[c(10,20),1]==c(9,9)))
+      checkTrue(sum(is.na(res$sdiff[,1]))==18)
+  }
+  
+  test_crossover_gRxCluster <- function(){
+  
+      res <- gRxCluster(rep("a",100),1:100L,rep(c(FALSE,TRUE),each=50),
+                        kvals=10L:30L, cutptExprs=rep(Inf,1))
+      checkTrue(length(res)==2)
+      checkEquals(res$value1,rev(res$value2))
+  }
+  
+  test_prune_gRxCluster <- function(){
+  
+      res <- gRxCluster(rep("a",100),1:100L,
+                        c(rep(TRUE,5),rep(c(FALSE,TRUE),each=45),rep(FALSE,5)),
+                        kvals=10L:30L, cutptExprs=rep(Inf,1))
+      checkTrue(length(res)==2)
+      checkEquals(width(res),rep(45,2))
+  }
+  
+  test_bad_args_gRxCluster <- function(){
+      checkException(
+          gRxCluster(rep("a",100),0:100L,
+                     c(rep(TRUE,5),rep(c(FALSE,TRUE),each=45),rep(FALSE,5)),
+                     kvals=10L:30L, cutptExprs=rep(Inf,1)),
+          "arg lengths not equal")
+  }
+  
+  test_permutation_both_ways_gRxCluster <- function(){
+          seqnm <- as.integer(rep(1:5,each=200))
+          st1 <- sort(sample(10000,1000))
+          al1 <- rbinom(1000,1,0.5)
+          al1[50:75] <- 1L
+          sample.id <- seq_along(al1)-1
+          sample.tab <- al1
+          set.seed(12345)
+  
+          res4 <-
+              gRxCluster(
+                  as.integer(seqnm),
+                  as.integer(st1),
+                  as.integer(al1),
+                  as.integer(c(15:16)),
+                  nperm=20L,
+                  sample.id=as.integer(sample.id+1),
+                  sample.tab=as.integer(sample.tab))
+                  set.seed(12345)
+  
+          set.seed(12345)
+          res5 <-
+              gRxCluster(
+                  as.integer(seqnm),
+                  as.integer(st1),
+                  as.integer(al1),
+                  as.integer(c(15:16)),
+                  nperm=20L)
+  
+          checkEquals(metadata(res4)$perm_cluster_best,
+                      metadata(res4)$perm_cluster_best)
+      }
+  
+#+END_SRC
+
+
+*** user functions
+
+
+**** gRxCluster hidden
+
+#+NAME: function-dot-gRxCluster
+#+BEGIN_SRC R :tangle ../geneRxCluster/R/dot-gRxCluster.R
+  ##' @include grx_clust_Call.R
+  ##' @include Rutils.R
+  .gRxCluster <-
+      function(chr.starts, chr.ends, starts, group, kvals, nperm,
+               cutpt.filter.expr = quote(as.double(apply(x,2,median,na.rm=TRUE))),
+               cutpt.tail.expr = quote(cutpt.threshhold.binom(k,n,val=0.0005)),
+               pruneFun=prune.loglik,
+               tmp.env = new.env(),sample.id,sample.tab)
+      {
+          ## Purpose: Cluster Regions of Relatively High Frequency  
+          ## ----------------------------------------------------------------------
+          ## Arguments:
+          ##   arg               | description                                   
+          ##  -------------------+-----------------------------------------------
+          ##   chr.starts        | 1-based integer - where chromo starts         
+          ##   chr.ends          | 1-based integer - where chromo ends           
+          ##   starts            | integer site of attack
+          ##   group             | integer 0:1 - same length as starts 
+          ##   kvals             | integer window widths                         
+          ##   nperm             | integer - number of permutations for FDR      
+          ##   cutpt.filter.expr | R expr with (optional) var x to filter windows
+          ##                     |   must eval to mode "double"
+          ##   cutpt.tail.expr   | R expr with (optional) vars: ccnt,k,n
+          ##                     |   list - see help for cutpt.threshhold.val 
+          ##   pruneFun          | usually prune.loglik
+          ##   tmp.env           | environment in which to eval() cutpt.* expr's
+          ##   sample.id         | vector of integer or factor id's
+          ##   sample.tab        | vector of 0:1's length(sample.tab)==max(sample.id)
+          ##  -------------------------------------------------------------------
+          ##
+          ## Author: Charles Berry, Date: 27 Apr 2013, 09:37, rev 3 Dec 2013
+      
+          ## check chr.starts, chr.ends, starts, kvals, nperm,
+          ## sample.id, sample.tab, and (maybe) cutpt.* expr's
+  
+          was.quoted <- function(x){
+              is.name(x) ||
+              isTRUE(try(is.language(x),TRUE)) &&
+                  isTRUE(try(is.call(x),TRUE))
+          }
+  
+          ## need quote(...) args iff lookup is done in tmp.env to keep
+          ## from trying to find naked objects elsewhere with was.quoted()
+          
+          was.overquoted <- function(x){
+              !is.name(x) &&
+                  isTRUE(try(as.character(x[1])=='quote'))
+          }
+  
+          nperm <- as.integer(nperm)
+          stopifnot( length(chr.starts)==length(chr.ends) )
+   
+          stopifnot( tail(chr.ends,1)==length(starts) )
+          stopifnot( is.integer(kvals) && all(kvals>1) )
+          stopifnot( nperm >= 0 )
+          if (is.atomic(cutpt.filter.expr))
+              {
+                  cfe <- as.double(cutpt.filter.expr)
+                  if (length(cfe)!=1 || any(is.na(cfe)))
+                      stop("bad cutpt.filter.expr arg")
+                  cutpt.filter.expr <-
+                      bquote(rep(.(atom),length=ncol(x)),
+                             list(atom=cfe))
+              }
+          else
+              {
+                  if (!was.quoted(cutpt.filter.expr))
+                      stop("cutpt.filter.expr malformed ??")
+                  else
+                      if (was.overquoted(cutpt.filter.expr))
+                          cutpt.filter.expr <- eval(cutpt.filter.expr)
+  
+              }
+  
+          if (!was.quoted(cutpt.tail.expr))
+              stop("cutpt.tail.expr malformed ??")
+          else
+              if (was.overquoted(cutpt.tail.expr))
+                  cutpt.tail.expr <- eval(cutpt.tail.expr)
+          
+          stopifnot( all(as.integer(group) %in% 0:1 ) )
+          stopifnot( all( head(kvals,-1) < tail(kvals,-1) ) )
+          pruneFun <- match.fun(pruneFun)
+          ## coerce to integer
+          sn <- names(chr.starts) # hold names
+          chr.starts <-  as.integer(chr.starts)
+          chr.ends   <-  as.integer(chr.ends  )
+          starts     <-  as.integer(starts    )
+          kvals <- as.integer(kvals)
+          group <- as.integer(group)
+          
+          ## order of starts must be non-decreasing on each chromo
+          starts.dont.decrease <-
+              function(i) all( diff( starts[chr.starts[i]:chr.ends[i] ] ) >=0 )
+          
+          stopifnot( all(sapply(seq_along(chr.starts), starts.dont.decrease )))
+  
+          ## sample.id and sample.tab
+  
+          if (missing(sample.tab)) sample.tab <- integer(0)
+          if (missing(sample.id)) sample.id <- integer(0)
+          
+          if (length(sample.tab)) {
+              sample.id <- as.integer(sample.id)
+              sample.tab <- as.integer(sample.tab)
+              stopifnot(length(sample.tab)==max(sample.id))
+              stopifnot(all(sample.tab %in% 0:1))
+              ## be sure these agree with group
+              if (any(sample.tab[sample.id]!=group))
+                  stop("sample.tab[sample.id] MUST = group")
+              ## index from 0 in C:
+              sample.id <- sample.id - 1L 
+          }
+              
+          ## C code checks is.double( eval( cutpt.filter.expr, tmp.env ) )
+          
+          res <- grx_clust_Call(
+              chr.starts, chr.ends, starts, group, kvals,
+              cutpt.filter.expr,
+              cutpt.tail.expr,
+              tmp.env, nperm,
+              sample.id,sample.tab)
+          
+          names(res) <-
+              c("kcounts", "ct", "cutptFunRes", "depth", "cluster_id",
+                "sitewise_best", "cluster_best", "summary_matrix", "sdiff",
+                "cutptSdiff")
+          ## prune
+          smat <- res[['summary_matrix']][[1]]
+  
+  
+          gr <-
+              GRanges(seqnames =
+                      if (length(sn)) {
+                          factor(sn[findInterval( smat[,1] , chr.starts)],sn)
+                      } else {
+                          as.character(findInterval( smat[,1] , chr.starts))
+                      },
+                      IRanges(start=starts[smat[,1]],end=starts[smat[,2]]),
+                      depth= smat[,3],
+                      value1= smat[,4],
+                      value2= smat[,5],
+                      clump.id= res[["cluster_id"]][smat[,1]])
+          
+          pruned <-
+              if (length(gr))
+                  pruneFun(gr, prop.table(table(group))[1])
+              else
+                  gr
+          
+          ## the first cluster_best element is always not in a cluster,
+          ## but can be smallish near conflicts
+          pruned$target.min <- res[["cluster_best"]][[1]][-1] 
+          
+          metadata(pruned)[["criticalValues"]] <- res[["cutptFunRes"]]
+          metadata(pruned)[[ "kvals" ]] <- kvals
+          metadata(pruned)[[ "perm_cluster_best" ]] <-
+              lapply( res[["cluster_best"]][-1], '[', -1)
+          
+          metadata(pruned)[['summary_matrix']] <- res[['summary_matrix']][[1]]
+  
+          pruned
+      }
+  
+#+END_SRC
+
+#+RESULTS: function-dot-gRxCluster
+
+#+RESULTS: function-gRxCluster
+
+
+***** using both setup
+
+****** both setup
+
+#+NAME: R-both-setup 
+#+BEGIN_SRC R
+  require( inline )
+  chr.lens <- runLength(seqnames(combo.so[both.ok,]))
+  chr.starts <- head(cumsum(c(1,chr.lens)),-1)
+  chr.ends <- cumsum(chr.lens)  
+  st1 <- start(combo.so)[both.ok]
+  al1 <- (combo.so$expt=="Wang")[both.ok]
+#+END_SRC
+
+#+RESULTS: R-input-setup
+: Loading required package: inline
+
+
+****** result
+
+#+NAME: 
+#+BEGIN_SRC R
+  res.both <-
+    .gRxCluster(chr.starts, chr.ends, st1, al1,
+                as.integer(c(15:35,45,55,65,75)), 20L)
+#+END_SRC
+
+#+RESULTS:
+
+***** using wang setup
+****** setup
+
+#+NAME: R-wang-setup
+#+BEGIN_SRC R
+  require( inline )
+  chr.lens <- runLength(seqnames(combo.so[wang.ok,]))
+  chr.starts <- head(cumsum(c(1,chr.lens)),-1)
+  names(chr.starts) <- as.character(runValue(seqnames(combo.so[wang.ok,])))
+  chr.ends <- cumsum(chr.lens)  
+  st1 <- start(combo.so)[wang.ok]
+  al1 <- (combo.so$alias=="Mse")[wang.ok]
+#+END_SRC
+
+#+RESULTS: R-wang-setup
+
+#+RESULTS:
+
+****** result
+
+#+BEGIN_SRC R
+  res.wang <-
+    .gRxCluster(chr.starts, chr.ends, st1, al1,
+                as.integer(c(15:35,45,55,65,75)), 20L)
+#+END_SRC
+
+#+RESULTS:
+
+
+
+***** make and use ocw setup
+
+
+****** setup
+#+BEGIN_SRC R
+  require( inline )
+  chr.lens <- runLength(seqnames(combo.so[ocw.ok,]))
+  chr.starts <- head(cumsum(c(1,chr.lens)),-1)
+  chr.ends <- cumsum(chr.lens)  
+  st1 <- start(combo.so)[ocw.ok]
+  al1 <- (combo.so$alias)[ocw.ok]
+#+END_SRC
+
+#+RESULTS:
+
+
+****** runs
+
+#+NAME: 
+#+BEGIN_SRC R
+  
+  res.ocw <- list()
+  
+  for (inf in c("InfectionI-","InfectionII-","InfectionIII")){
+    res.ocw[[inf]] <- 
+      .gRxCluster(chr.starts, chr.ends, st1,
+                  as.integer(al1==inf),
+                  as.integer(c(15:35,45,55,65,75)), 20L)
+  }
+  
+#+END_SRC
+
+#+RESULTS:
+
+
+**** gRxCluster GRanges
+
+:DEVNOTES:
+
+Maybe I will extend gRxClsuter to S4 methods in which case this stuff
+might help set up for c("GRanges","missing","missing"), etc methods:
+
+#+NAME: function-R-gRxCluster-Granges
+#+BEGIN_SRC R 
+  .gRxCluster.GRanges <-
+      function(object, starts, group, kvals, nperm=0L, ...,
+               cutpt.filter.expr, cutpt.tail.expr, tmp.env)
+      {
+          mc <- match.call()
+          lc <- list()
+          lc$starts <-
+              if (missing(starts))
+                  start(object)
+              else
+                  starts(object)
+  
+          lc$group <- if (missing(group))
+              mcols(object)[,"group"]
+          else
+              group(object)
+  
+          lc$seqnames <- seqnames(object)
+          
+          mc[[1]] <- as.name("gRxCluster")
+          mc$object <- as.name("object")
+          mc$starts <- as.name("starts")
+          mc$group <- as.name("group")
+          eval(mc,lc,parent.frame(2))
+      }
+  
+#+END_SRC
+:END:
+
+**** gRxCluster master
+
+:DEVNOTES:
+
+Need to add back seqnames, if any.
+
+Call With SO or GRanges.
+
+Call with data.frame
+
+Call with args
+
+Maybe define an S4 class for the result to capture show and summary,
+but don;t get carried away with new validity checks.
+
+When using ess-roxy need to spec a value or an error will result 
+
+Maybe add an expression to be eval'ed in .gRxCluster, which could be
+like:
+
+	assign("res",res, envir=tmp.env)
+
+
+:END:
+
+
+#+NAME: function-R-gRxCluster
+#+BEGIN_SRC R :tangle ../geneRxCluster/R/gRxCluster.R
+  ##' gRxCluster
+  ##' 
+  ##' cluster integration sites - optionally perform the permutations
+  ##' needed to estimate the discoveries expected under a null
+  ##' hypothesis
+  ##' @param object chromosome names or other grouping of starts 
+  ##' @param starts ordered chromosome position or ordered integer
+  ##' vector 
+  ##' @param group logical vector separating two groups
+  ##' @param kvals integer vector of window widths
+  ##' @param nperm number of permutations for FDR calculation
+  ##' @param pruneFun a function like \code{prune.loglik}. 
+  ##' @param ... other args
+  ##' 
+  ##' @param cutpt.filter.expr (optional) R object or call (or variable
+  ##' naming a call) with (optional) var x (window widths in base pairs)
+  ##' to filter windows. It must evaluate to mode "double". If not specified,
+  ##' \code{as.double(apply(x,2,median,na.rm=TRUE))} is used. If an
+  ##' atomic vector of length one is supplied it is expanded to the
+  ##' proper length and coerced to double. If this arg is the name of a
+  ##' variable provided in \code{tmp.env}, it must be protected with
+  ##' \code{quote(\dots)}.
+  ##' 
+  ##' @param cutpt.tail.expr R object or call (or variable naming a
+  ##' call) with (optional) vars: k,n, and x (as above). Returns list
+  ##' like \code{critVal.target}. k is a vector of the number of sites
+  ##' in a collection of windows, and n is a vector of counts or
+  ##' proportions for the two classes of insertion. If not supplied,
+  ##' \code{critVal.target(k,n,target=5,posdiff=x)} is used.  If this
+  ##' arg is the name of a variable provided in \code{tmp.env}, it must
+  ##' be protected with \code{quote(\dots)}.
+  ##'
+  ##' @param tmp.env (optional) environment to use in evaluation of
+  ##' cutpt.* expressions. This is usually needed for
+  ##' \code{\link{critVal.power}}, which is first calculated and placed
+  ##' in the environment, and the supplied object is used in the
+  ##' expression for \code{cutpt.filter.expr}.
+  ##'
+  ##' 
+  ##' @param sample.id (optional) integer vector indexing cells in
+  ##' \code{sample.tab} to be looked up to determine \code{group} under
+  ##' permutation. A factor can be used, too, but will be coerced to
+  ##' integer.
+  ##' 
+  ##' @param sample.tab (optional) integer vector containing 0 or 1 in
+  ##' each cell. Its length is the same as \code{max(sample.id)}. Both
+  ##' or neither \code{sample.id} and \code{sample.tab} should be
+  ##' supplied. When supplied \code{sample.tab[sample.id]} must equal
+  ##' \code{group}. If the arguments are supplied, permutations are of
+  ##' the form \code{sample(sample.tab)[sample.id]}. Otherwise they are
+  ##' of the form \code{sample(group)}.
+  ##' 
+  ##' @return a GRanges object with a special metadata slot, see
+  ##' \code{\link{gRxCluster-object}}
+  ##' 
+  ##' @author Charles Berry
+  ##' example inst/ex-gRxCluster.R
+  ##' @export
+  ##' @import GenomicRanges
+  ##' @import  IRanges
+  ##' @useDynLib geneRxCluster
+  ##' @include dot-gRxCluster.R
+  gRxCluster <-
+      function(object, starts, group, kvals, nperm=0L, pruneFun=prune.loglik, ...,
+               cutpt.filter.expr,
+               cutpt.tail.expr,  tmp.env, sample.id, sample.tab)
+      {
+          
+          mc <- match.call()
+  
+          if (!is.name(mc$cutpt.tail.expr))
+              cutpt.tail.expr <-
+                  if (missing(cutpt.tail.expr)) 
+                      quote(critVal.target(k,n,target=5,posdiff=x))
+                  else
+                      mc$cutpt.tail.expr
+          
+          if (!is.name(mc$cutpt.filter.expr))
+              cutpt.filter.expr <-
+                  if (missing(cutpt.filter.expr)) 
+                      quote(as.double(apply(x,2,median,na.rm=TRUE)))
+                  else
+                      mc$cutpt.filter.expr
+          
+          if (missing(tmp.env)) tmp.env <- new.env()
+          
+          ## basic sanity checks
+          
+          if (length(object)!=length(starts) || length(starts) != length(group))
+              stop("object, starts, and group must have same lengths")
+          
+          
+          ## object order checked in .gRxCluster(...)
+          
+          object <- as(object,"Rle")
+          chr.lens <- runLength(object)
+          chr.starts <- start(object) 
+          names(chr.starts) <- as.character(runValue(object))
+          chr.ends <- end(object) 
+          
+          res <- 
+              .gRxCluster(chr.starts, chr.ends, starts, group, kvals, nperm,
+                          cutpt.filter.expr, cutpt.tail.expr, pruneFun, tmp.env,
+                          sample.id, sample.tab)
+          
+          if (is.null(mc$cutpt.tail.expr)) mc$cutpt.tail.expr <-
+              cutpt.tail.expr
+          if (is.null(mc$cutpt.filter.expr)) mc$cutpt.filter.expr <-
+              cutpt.filter.expr
+          
+          metadata(res)$call <- mc
+          
+          res
+      }
+  
+  
+#+END_SRC
+
+#+RESULTS: function-R-gRxCluster
+
+#+NAME: example-R-gRxCluster
+#+BEGIN_SRC R :tangle ../geneRxCluster/inst/ex-gRxCluster.R
+  # examples invoking gRxCluster
+  
+  x.seqnames <- rep(letters[1:3],each=50)
+  x.starts <- c(seq(1,length=50),seq(1,by=2,length=50),seq(1,by=3,length=50))
+  x.lens <- rep(c(5,10,15,20,25),each=2)
+  x.group <- rep(rep(c(TRUE,FALSE),length=length(x.lens)),x.lens)
+  x.kvals <- as.integer(sort(unique(x.lens)))
+  x.res <- gRxCluster(x.seqnames,x.starts,x.group,x.kvals)
+  x.res
+  rm( x.seqnames, x.starts, x.lens, x.group, x.kvals, x.res)
+#+END_SRC
+
+#+NAME: test-R-gRxCluster
+#+BEGIN_SRC R
+  require(geneRxCluster,lib.loc="geneRxCluster.Rcheck")
+  st1 <- start(combo.so)
+  al1 <- (combo.so$expt=="Wang")
+  gRxTest <- gRxCluster(seqnames(combo.so), st1, group=al1, as.integer(c(15:35,45,55,65,75)),nperm=20L)
+#+END_SRC
+
+#+RESULTS: test-R-gRxCluster
+: Loading required package: geneRxCluster
+
+Check the totals in gRxTest against countOverlaps
+
+
+**** debug gRxCluster
+
+#+NAME: function-R-gRxClusterSetupOnly
+#+BEGIN_SRC R 
+  ##' gRxClusterSetupOnly
+  ##' 
+  ##' cluster integration sites
+  ##' @param seqnames chromosome names or other grouping of starts 
+  ##' @param starts ordered chromosome position or other integer vector
+  ##' @param group - two level factor identifying groups
+  ##' @param kvals - integer vector of window widths
+  ##' @param nperm - number of permutations for FDR calculation
+  ##' @param ... other args 
+  ##' @param cutpt.filter.expr (optional) R expr with (optional) var x
+  ##' to filter windows must eval to mode "double"
+  ##' @param cutpt.tail.expr R expr with (optional) vars: ccnt,k,n. Returns list.
+  ##' @param tmp.env (optional) environment to use in evaluation of
+  ##' cutpt.* expressions
+  ##' @return a gRxC object
+  ##' @author Charles Berry
+  ##' @export
+  ##' @import GenomicRanges
+  ##' @import  IRanges
+  ##' @useDynLib geneRxCluster
+  ##' @include dot-gRxCluster.R
+  gRxClusterSetupOnly <-
+    function(seqnames, starts, group, kvals, nperm=0L, ..., cutpt.filter.expr,
+             cutpt.tail.expr, tmp.env)
+  {
+  
+    mc <- match.call()
+   
+   
+    if (missing(tmp.env)) tmp.env <- new.env()
+    
+    if (missing(cutpt.tail.expr)) cutpt.tail.expr <-
+      quote(cutpt.threshhold.binom(k,n,val=0.0005))
+    
+    if (missing(cutpt.filter.expr)) cutpt.filter.expr <-
+      quote(as.double(apply(x,2,median,na.rm=TRUE)))
+    
+    ## seqnames order checked in .gRxCluster(...)
+  
+    seqnames <- as(seqnames,"Rle")
+    chr.lens <- runLength(seqnames)
+    chr.starts <- head(cumsum(c(1,chr.lens)),-1)
+    names(chr.starts) <- as.character(runValue(seqnames))
+    chr.ends <- cumsum(chr.lens)  
+    
+    res <- 
+      list(as.integer(chr.starts), as.integer(chr.ends),
+           as.integer(starts), group, kvals, nperm,
+                  cutpt.filter.expr, cutpt.tail.expr, tmp.env)
+  
+    
+    res.names.in.grx_clust_Call <- 
+        c(chromoSts="chr.starts",
+          chromoEnds="chr.ends",
+          strt="starts",
+          grp="group",
+          kvals="kvals",
+          nperm="nperm",
+          cutptExprs="cutpt.filter.expr",
+          cutptFunExprs="cutpt.tail.expr",
+          tmpEnv="tmp.env")
+    
+    names(res) <- names(res.names.in.grx_clust_Call)
+    res
+  }
+      
+#+END_SRC
+
+
+#+NAME: test-R-gRxClusterSetupOnly
+#+BEGIN_SRC R
+  require(geneRxCluster,lib.loc="geneRxCluster.Rcheck")
+  st1 <- start(combo.so)
+  al1 <- (combo.so$expt=="Wang")
+  gRxTestSetup <- gRxClusterSetupOnly(seqnames(combo.so), st1, group=al1, as.integer(c(15:35,45,55,65,75)),nperm=10L)
+  gRxTestRun <- do.call(geneRxCluster:::grx_clust_Call,gRxTestSetup,quote=T)
+  
+  names(gRxTestRun) <-
+      c("kcounts", "ct", "cutptFunRes", "depth", "cluster_id",
+        "sitewise_best", "cluster_best", "summary_matrix", "sdiff",
+        "cutptSdiff")
+#+end_src
+
+
+Looks like the problem is due to overlaps (start and end) and exact
+matching of start points in which only one or some of the elements are
+included.
+
+#+begin_src R
+  smat <- gRxTestRun[['summary_matrix']][[1]]
+  sn <- as.character( runValue(as( seqnames(combo.so),"Rle")) )
+  
+  gr <-
+      GRanges(seqnames =
+              if (length(sn)) {
+                  factor(sn[findInterval( smat[,1] , gRxTestSetup$chromoSts)],sn)
+              } else {
+                  as.character(findInterval( smat[,1] , gRxTestSetup$chromoSts))
+              },
+              IRanges(start=gRxTestSetup$strt[smat[,1]],
+                      end=gRxTestSetup$strt[smat[,2]]),
+              depth= smat[,3],
+              value1= smat[,4],
+              value2= smat[,5],
+              clump.id= gRxTestRun[["cluster_id"]][smat[,1]])
+  
+  
+  
+  sum(gr$value1)+sum(gr$value2)
+  sum(countOverlaps(gr,combo.so,ignore.strand=TRUE))
+  
+  badT <- (smat[,5]!=(cT <- countOverlaps(gr,resize(combo.so[al1,],width=2),ignore.strand=TRUE)))
+  badF <- (smat[,4]!=(cF <- countOverlaps(gr,resize(combo.so[!al1,],width=2),ignore.strand=TRUE)))
+  
+  tmp.gd <- paste(gRxTestRun$cluster_id,gRxTestRun$depth)
+  rle.gd <- rle(tmp.gd)
+  rle.gd$values[rle.gd$values!="0 0"] <- 1:sum(rle.gd$values!="0 0")
+  ufactor <- function(x) factor(x,unique(x))
+  tmp.gdf <- ufactor(paste(tmp.gd,inverse.rle(rle.gd)))
+  
+  tab.depth.grp.id <- table(tmp.gdf,gRxTestSetup$grp)
+  
+  table(tab.depth.grp.id[-1,]==smat[,4:5]) # clustsum() works
+  
+  table(tab.depth.grp.id[-1,]==cbind(cF,cT)) # clustsum() disagrees with countOverlaps
+  
+  bad <- which(tab.depth.grp.id[-1,]!=cbind(cF,cT),arr.ind=T) # clustsum() disagrees with countOverlaps
+  
+  bad.orig <- which(tmp.gdf%in%rownames(bad)[1])
+  nearby <- function(x) (min(x)-2):(max(x)+2)
+  nearby(bad.orig)
+  as.data.frame(combo.so[nearby(bad.orig),])[,-(4:12)]
+  bad.res <- lapply(rownames(bad),
+         function(x) countOverlaps(combo.so[which(tmp.gdf%in%x),],combo.so))
+  
+  
+#+END_SRC
+
+
+
+
+**** gRxCluster summary
+
+There is still work here: maybe add a line to determine 'val' from
+'=attr(metadata(object)$crit[[ i ]],"val")='
+
+
+#+NAME: R-gRxSummary
+#+BEGIN_SRC R :tangle ../geneRxCluster/R/gRxSummary.R
+  ##' Summarize gRxCluster Results
+  ##'
+  ##' Get the FDR and related data for a run of gRxCluster. By selecting
+  ##' a value for \code{targetFD} that is smaller that what was used in
+  ##' constructing the object, fewer clumps will be included in the
+  ##' computation fo the False Discovery Rate - akin to what would have
+  ##' been obtained from the object if it had been constructed using
+  ##' that value.
+  ##' 
+  ##' @title gRxSummary
+  ##' @param object the result of gRxCluster
+  ##' @param targetFD the critical value target in each tail
+  ##' @return a list containing the summarized results
+  ##' @export
+  ##' @example inst/ex-gRxSummary.R
+  ##' @include gRxCluster.R
+  ##' @author Charles Berry
+  gRxSummary<-
+    function(object, targetFD=NULL)
+  {
+    if (!(
+      inherits(object,"GRanges") &&
+      {
+        mc <- metadata(object)$call
+        isTRUE( mc[[1]] == quote(gRxCluster))
+      }))
+      stop("This object was not made by gRxCluster.")
+    
+    
+    if (is.null(targetFD)){
+        ## get target from $criticalValues
+        targetFD <- max(sapply(metadata(object)$criticalValues,
+                           function(x) attr(x,"target")))
+    }
+    
+    nperms <- as.list(mc)[["nperm"]]
+    
+    perms <- metadata(object)$perm_cluster_best
+    nd <- sum(object$target.min<=targetFD)
+    npd <- sum(unlist(perms)<=targetFD)
+    fdr <- sum(npd)/nperms/(1+nd)
+    
+    res <-
+      list(
+        Clusters_Discovered=nd,
+        FDR=fdr,
+        permutations=nperms,
+        targetFD=
+        if (is.infinite(targetFD)) "UnDetermined" else targetFD,
+        call=mc)
+    
+    res
+    
+  }
+  
+#+END_SRC
+
+#+RESULTS: R-gRxSummary
+
+#+NAME: example-R-gRxSummary
+#+BEGIN_SRC R :tangle ../geneRxCluster/inst/ex-gRxSummary.R
+  
+  x.seqnames <- rep(letters[1:3],each=50)
+  x.starts <- c(seq(1,length=50),seq(1,by=2,length=50),seq(1,by=3,length=50))
+  x.lens <- rep(c(5,10,15,20,25),each=2)
+  x.group <- rep(rep(c(TRUE,FALSE),length=length(x.lens)),x.lens)
+  x.kvals <- as.integer(sort(unique(x.lens)))
+  x.res <- gRxCluster(x.seqnames,x.starts,x.group,x.kvals,nperm=100L)
+  gRxSummary(x.res)
+  rm( x.seqnames, x.starts, x.lens, x.group, x.kvals, x.res)
+#+END_SRC
+
+
+#+NAME: test-R-gRxSummary
+#+BEGIN_SRC R
+gRxTestSmry <- gRxSummary(gRxTest)
+#+END_SRC
+
+#+RESULTS: test-R-gRxSummary
+
+**** gRxCluster plot
+
+#+NAME: R-gRxPlot
+#+BEGIN_SRC R  :tangle ../geneRxCluster/R/gRxPlot.R
+  ##' Plot Clumps and/or Critical Regions
+  ##'
+  ##' The results of a call to \code{\link{gRxCluster}} are plotted. Optionally, with
+  ##' \code{method="criticalRegions"} only the critical regions
+  ##' are plotted or with \code{method="odds"} the log odds only are plotted.
+  ##' @title gRxPlot
+  ##' @param object either the results of \code{\link{gRxCluster}} or a
+  ##' list containing cutpoints for critical regions.
+  ##' @param pi.0 the background proportion for vector 2
+  ##' @param method character vector of \dQuote{odds} and/or \dQuote{criticalRegions}
+  ##' @param xlim limits of the log odds histogram  
+  ##' @param main a title for the panel(s)
+  ##' @param xlab label fgor the x-axis of the log odds plot
+  ##' @param breaks see \code{\link{hist}}
+  ##' @param kvals values to use in selecting a subset of the critical
+  ##' regions to display
+  ##' @param ... other args to pass to the plotting routine(s)
+  ##' @seealso \code{\link{gRxPlotClumps}} for a more fine grained display
+  ##' @return see \code{\link{hist}}
+  ##' @include gRxCluster.R
+  ##' @example inst/ex-gRxPlot.R
+  ##' @export
+  ##' @author Charles Berry
+  gRxPlot <- function(object,pi.0=NULL, method=c("odds","criticalRegions"),
+                      xlim=NULL,main=NULL,xlab="log odds ratio",
+                      breaks="Sturges",kvals=NULL,...){
+      match.methods <- match.arg(method, several.ok=TRUE)
+  
+      if (any(match.methods=="odds" )){
+          vals <- as.data.frame(mcols(object)[,c("value1","value2")])
+          if (nrow(vals)){
+              log.odds <- qlogis((vals$value2+0.5)/(rowSums(vals)+1)) - 
+                  if (is.null(pi.0)) qlogis((sum(vals$value2)+0.5)/(sum(vals)+1))
+                  else
+                      qlogis( pi.0)
+              hx <- hist( log.odds , breaks=breaks, plot=FALSE )
+              louter <- if (is.null(xlim)) c(-1,1)*max(abs(hx$breaks)) else xlim
+              plot(hx,xlim=louter,xlab=xlab,main=main,...)
+          } else {
+              warning("No clumps to plot for method = \"odds\"")
+          }
+      }
+      if (any(match.methods=="criticalRegions")){
+          if (inherits(object,"GRanges"))
+              ctpt <- metadata(object)$criticalValues
+          if (is.list(object)) ctpt <- object
+          plot.cutpoints(ctpt,pi.0=pi.0,kvals=kvals,main=main, ...)    
+      }
+  }
+#+END_SRC
+
+#+NAME: example-R-gRxPlot
+#+BEGIN_SRC R :tangle ../geneRxCluster/inst/ex-gRxPlot.R
+  x.seqnames <- rep(letters[1:3],each=500)
+  x.starts <- c(seq(1,length=500),seq(1,by=2,length=500),seq(1,by=3,length=500))
+  x.lens <- rep(c(5,10,15,20,25),each=20)
+  x.group <- rep(rep(c(TRUE,FALSE),length=length(x.lens)),x.lens)
+  ## add a bit of fuzz:
+  x.group <- 1==rbinom(length(x.group),1,pr=ifelse(x.group,.8,.2))
+  x.kvals <- as.integer(sort(unique(x.lens)))
+  x.res <- gRxCluster(x.seqnames,x.starts,x.group,x.kvals)
+  gRxPlot(x.res)
+  rm( x.seqnames, x.starts, x.lens, x.group, x.kvals, x.res)  
+#+END_SRC
+
+**** gRxCluster plot method 
+
+
+#+NAME: function-R-gRxPlotClumps
+#+BEGIN_SRC R :tangle ../geneRxCluster/R/gRxPlotClumps.R
+  ##' Plot gRxCluster object clumps
+  ##'
+  ##' Plot Relative Frequencies of the two classes according to
+  ##' region. Regions typically alternate between clusters and
+  ##' non-clusters on each chromosome.
+  ##' @title gRxPlotClumps
+  ##' @param object result of gRxCluster
+  ##' @param data (optional) GRanges like that from which args to gRxCluster were derived
+  ##' @param seqlens (optional) seqlengths(data) or similar. Can be given if data is missing
+  ##' @param panelExpr - an expression to evaluate after drawing each panel
+  ##' @return NULL
+  ##' @export
+  ##' @example inst/ex-gRxPlotClumps.R
+  ##' @include gRxCluster.R
+  ##' @author Charles Berry
+  gRxPlotClumps <-
+      function(object,data,seqlens,panelExpr=quote(grid()))
+      {        
+          if (missing(data)){
+              dcall <- metadata(object)$call
+              dcall[[1]] <- as.name("list")
+              dcall <- dcall[1:4]
+              data <- try(eval.parent(dcall))
+              if (class(data)=="try-error")
+                  stop("Could not reconstruct data - Provide an explicit data argument")
+              
+              data <- 
+                  GRanges(seqnames=data$object,
+                          IRanges(start=data$starts,
+                                  width=rep(1,length(data$starts))),
+                          strand=rep("*",length(data$starts)),
+                          group=data$group)
+          }
+          if (missing(seqlens)){
+              seqlens <- seqlengths(object)
+              if (any(is.na(seqlens))) seqlens <- try(seqlengths(data))
+              if (class(seqlens)=="try-error" || any(is.na(seqlens))){
+                  message("Using highest starts as seglens")
+                  seqlens <- start(data)[cumsum(runLength(seqnames(data)))]
+                  names(seqlens) <- as.character(runValue(seqnames(data)))
+              }
+          }
+          seqlengths(object)[names(seqlens)] <- seqlens
+          
+          max.len <- max(seqlens)
+          p.null <- prop.table(table(data$group))[1]
+          
+          obj.gaps <- gaps(object)
+          obj.gaps <- obj.gaps[strand(obj.gaps)=="*",]
+          over.data <- findOverlaps(obj.gaps,data,ignore.strand=TRUE)            
+          gap.tab <-
+              table(factor(queryHits(over.data)),
+                    data$group[subjectHits(over.data)])        
+          
+          mcols(obj.gaps)[as.numeric(rownames(gap.tab)),"value1"] <- gap.tab[,1]
+          mcols(obj.gaps)[as.numeric(rownames(gap.tab)),"value2"] <- gap.tab[,2]
+          
+          gap.y <- obj.gaps$value1 / ( obj.gaps$value1 + obj.gaps$value2 )
+          ungap.y <- object$value1 / ( object$value1 + object$value2 )
+          
+          npanels <- length(seqlens)
+          par(mfrow = c( ceiling(npanels/3), 3 ),mar=c(0,0.5,0.2,0))
+          for (i in names(seqlens)){
+              gap.subset <- as.vector(seqnames(obj.gaps)==i)
+              ungap.subset <- as.vector(seqnames(object)==i)
+              xvals <- c(start(obj.gaps)[ gap.subset ],
+                         start(object)[ ungap.subset ],
+                         seqlens[i])
+              xv.order <- order(xvals)
+              yvals <- c( gap.y[gap.subset], 
+                         ungap.y[ungap.subset],p.null)
+              plot(xvals[xv.order],yvals[xv.order],ylim=0:1,xlim=c(-max.len/100,max.len),
+                   xaxs="r",yaxs="i",
+                   type='s',axes=F)
+              box()
+              segments( 1, p.null, seqlens[i], lty=3)
+              text( max.len, 0.02, i, adj=c(1,0) )
+              if (!is.null(panelExpr)) eval(panelExpr)
+          }
+      }
+    
+#+END_SRC
+
+
+#+NAME: example-R-gRxPlotClumps
+#+BEGIN_SRC R :tangle ../geneRxCluster/inst/ex-gRxPlotClumps.R
+  x.seqnames <- rep(letters[1:3],each=50)
+  x.starts <- c(seq(1,length=50),seq(1,by=2,length=50),seq(1,by=3,length=50))
+  x.lens <- rep(c(5,10,15,20,25),each=2)
+  x.group <- rep(rep(c(TRUE,FALSE),length=length(x.lens)),x.lens)
+  ## add a bit of fuzz:
+  x.group <- 1==rbinom(length(x.group),1,pr=ifelse(x.group,.8,.2))
+  x.kvals <- as.integer(sort(unique(x.lens)))
+  x.res <- gRxCluster(x.seqnames,x.starts,x.group,x.kvals)
+  gRxPlotClumps(x.res)
+  rm( x.seqnames, x.starts, x.lens, x.group, x.kvals, x.res)  
+#+END_SRC
+
+#+RESULTS: example-R-gRxPlot
+: Using highest starts as seglens
+
+
+**** geneRxCluster-package
+
+#+NAME: geneRxCluster-package-docs
+#+BEGIN_SRC R :tangle ../geneRxCluster/R/geneRxCluster-package.R
+  ##' Differential Clustering of Integration Sites
+  ##'
+  ##' geneRxCluster provides the function \code{\link{gRxCluster}} and friends.
+  ##'
+  ##' Windows defined by \code{k} consecutive integration sites are
+  ##' scanned. A two class indicator is tallied to determine whether one
+  ##' class dominates. If one does, a flag is set and the window is
+  ##' retained. Various values of \code{k} are used. Conflicts between
+  ##' overlapping windows with the same value of \code{k} can occur ---
+  ##' two windows are dominated by the two different classes. In that
+  ##' case, the sites of overlap are marked and neither window is
+  ##' retained. Conflicts can also arise between windows differing in
+  ##' their values of \code{k}. In that case, the window having the
+  ##' smaller value of \code{k} is retained and the other is discarded.
+  ##'
+  ##' Permutation tests and permutation based false discovery rates are
+  ##' available.
+  ##'
+  ##' Filtering of windows is allowed so that regions which are sparsely
+  ##' populated need not be studied.
+  ##'
+  ##' @docType package
+  ##' @name geneRxCluster
+  ##' 
+NULL
+#+END_SRC
+
+
+**** gRxCluster object help
+
+
+#+NAME: gRxCluster-object-help
+#+BEGIN_SRC Rd :tangle ../geneRxCluster/man/gRxCluster-object.Rd
+  \name{gRxCluster-object}
+  \alias{gRxCluster-object}
+  \title{gRxCluster object }
+  \description{Overview of the result of \code{gRxCluster(\dots)}
+  }
+
+  \details{
+
+    The object returned is a \code{\link{GRanges}} object.
+
+    If the object is \code{x}, \code{seqnames(x)} and \code{ranges(x)}
+    slots demarcate the clusters discovered. There will be one element for
+    each cluster (aka \sQuote{clump}) discovered.
+    
+    Using the default argument \code{pruneFun=prune.loglik} or
+    \code{pruneFun=noprune}, \code{mcols(x)} will have these 
+    columns:
+    
+    \describe{
+      \item{\code{value1} and
+        \code{value2}}{ are the counts of the two classes of insertion
+        sites for the clusters of object \code{x}}. \code{value2} sums the
+        \code{TRUE} values of the \code{group} argument.
+      \item{\code{clump.id}}{numbers each cluster.}
+    }
+    
+    If the user supplies a custom \code{pruneFun}, it should return a
+    \code{GRanges} with those columns and one element for each unique
+    \code{clump.id}. The column \code{target.min} has the smallest nominal
+    False Discoveries Expected for each cluster and is added to (or
+    replaces) the \code{mcols(x)} produced by the argument supplied as
+    \code{pruneFun}.
+
+    
+    \code{metadata(x)} will include these components:
+
+    \describe{
+      \item{criticalValues}{A list object such as supplied by
+        \code{\link{critVal.target}} whose elements each give the cutpoints
+        to be used for a window with \code{k} sites.
+        \code{attributes(metadata(object)$criticalValues[[i]])} will
+        contain elements
+        \describe{
+          
+          \item{fdr}{ with dimension \code{c(k+1,4)} of target false
+            discovery expectations and and the one-sided p-values}
+          \item{target}{ the target for false discovery which sometimes
+            is specified a priori and sometimes results from calculation}
+          \item{n}{an upper bound on the number of windows to screen, if
+            this number is needed.}  }
+        
+        In some cases, an attribute is attached to
+        \code{metadata(object)$criticalValues}, see
+        \code{\link{critVal.power}} for an example.
+      }
+    \item{kvals}{the number of sites, k, to include in a window}
+    \item{perm_cluster_best}{a \code{list} whose canonical element is a vector of
+      values like \code{x$target.min} obtained from a permutation of the
+      class indicators}
+    \item{summary_matrix}{a matrix giving the start, end, depth, and
+      counts in each class for every cluster and depth in sequential order }
+    \item{call}{the call invoking \code{\link{gRxCluster}}} which may
+    include some arguments added by default.            
+  }
+  }
+  \author{Charles Berry \email{ccberry@ucsd.edu}}
+  \keyword{cluster}
+
+#+END_SRC
+
+**** write user funs to package
+
+tangle the pure R stuff, then roxygenize it
+
+#+begin_src emacs-lisp
+(org-babel-tangle)
+#+end_src
+
+#+RESULTS:
+
+
+#+NAME: make-Rd
+#+BEGIN_SRC R 
+  require(roxygen2)
+  roxygenize("geneRxCluster")
+  ## compress whitespacing in fields roxy added to DESCRIPTION
+  desc <- read.dcf("geneRxCluster/DESCRIPTION")
+  write.dcf(desc,
+            file="geneRxCluster/DESCRIPTION",
+            keep.white=tools:::.keep_white_description_fields)
+  
+#+END_SRC
+
+#+RESULTS: make-Rd
+: Updating collate directive in  /Users/cberry/projects/bushman/clustering/geneRxCluster/DESCRIPTION 
+: Writing geneRxCluster.Rd
+
+#+NAME: 
+#+BEGIN_SRC R
+getwd()
+#+END_SRC
+
+#+RESULTS:
+: [1] "/Users/cberry/projects/bushman/clustering"
+
+** DESCRIPTION
+   :PROPERTIES:
+   :session:  *R*
+   :noweb:    yes
+   :results:  output
+   :END:
+
+#+NAME: description-tbl
+| Package     | geneRxCluster                                                                      |
+| Date        | 2013-02-13                                                                         |
+| Version     | 0.99.7                                                                             |
+| License     | GPL (>= 2)                                                                         |
+| Description | Detect Differential Clustering of Genomic Sites such as gene therapy integrations. |
+| Title       | gRx Differential Clustering                                                        |
+| Author      | Charles Berry                                                                      |
+| Maintainer  | Charles Berry <ccberry@ucsd.edu>                                                   |
+| biocViews   | Sequencing, Clustering, Genetics                                   |
+| Depends     | GenomicRanges,IRanges                                                              |
+| Suggests    | RUnit, BiocGenerics                                                                |
+
+#+NAME: long-description
+#+BEGIN_SRC fundamental
+  The package provides some functions for exploring genomic insertion
+  sites originating from two different sources. Possibly, the two
+  sources are two different gene therapy vectors.  Vectors are preferred
+  that target sensitive regions less frequently, motivating the search
+  for localized clusters of insertions and comparison of the clusters
+  formed by integration of different vectors.  Scan statistics allow the
+  discovery of spatial differences in clustering and calculation of
+  False Discovery Rates (FDRs) providing statistical methods for
+  comparing retroviral vectors. A scan statistic for comparing two
+  vectors using multiple window widths to detect clustering
+  differentials and compute FDRs is implemented here. 
+#+END_SRC
+
+
+#+NAME: description-src-block
+#+header: :session none
+#+BEGIN_SRC R :noweb yes :var df1=description-tbl :var pkgName="geneRxCluster"
+  df1$V2[df1$V1=="Description"] <- paste(df1$V2[df1$V1=="Description"], 
+  "
+  <<long-description>>")
+  
+  write.dcf(
+      structure(as.list(df1$V2), names=df1$V1),
+      file=file.path("..",pkgName,"DESCRIPTION")
+      )
+#+END_SRC
+
+#+RESULTS: description-src-block
+
+#+RESULTS:
+
+
+**** food for thought
+
+maybe the linearity of the FDR w.r.t. the nominal FDRs is to be
+expected.
+
+Run the other cases, and check if they are linear.
+
+If so, maybe use a linear interpolation to estimate the FDR.
+
+
+
+
+
+
+
+
+
+
+** vignette
+   :PROPERTIES:
+   :EXPORT_FILE_NAME: ../geneRxCluster/vignettes/tutorial.Rnw
+   :EXPORT_TITLE: Using geneRxCluster
+   :EXPORT_AUTHOR: Charles C. Berry
+   :EXPORT_LATEX_CLASS: minimalRnw
+   :session:  *R*
+   :results:  output
+   :EXPORT_LATEX_HEADER: %\VignetteIndexEntry{Using geneRxCluster}
+   :END:
+   
+*** Overview
+
+The ~geneRxCluster~ package provides some functions for exploring
+genomic insertion sites originating from two different
+sources. Possibly, the two sources are two different gene therapy
+vectors. In what follows, some simulations are used to create datasets
+to illustrate functions in the package, but it is not necessary to
+follow the details of the simulations to get an understanding of the
+functions. More examples and details are given by Supplement 2 of 
+Berry et al \cite{berry2014} available at the [[http://dx.doi.org/10.1093/bioinformatics/btu035][Bioinformatics web site]].
+
+
+*** Basic Use
+
+It might be helpful to look at these help pages briefly before getting
+started:
+
+|-------------------+-----------------------------------|
+| Function          | Purpose                           |
+|-------------------+-----------------------------------|
+| critVal.target    | a helper for gRxCluster           |
+| gRxCluster        | the main function                 |
+| gRxCluster-object | says what gRxCluster returns      |
+| gRxPlot           | plots results and crtical regions |
+| gRxSummary        | quick summary of results          |
+|-------------------+-----------------------------------|
+
+
+**** Reading Data from a File
+
+The core function in the package is ~gRxCluster~ and it requires
+genomic locations and group indicators.  Those basic data might be
+represented by a table like this:
+
+#+BEGIN_VERBATIM
+ chromo    pos   grp
+   chr1 176812 FALSE
+   chr1 191298  TRUE
+   chr1 337906  TRUE
+   chr1 356317  TRUE
+   chr1 516904 FALSE
+   chr1 661124 FALSE
+    .       .       .
+    .       .       .
+    .       .       .
+
+#+END_VERBATIM
+
+In =R= that table might be a ~data.frame~ or a collection of three
+equal length vectors. The first one here, =chromo=, indicates the
+chromosome. The =pos= column indicates the position on the chromosome
+(and note that the positions have been ordered from lowest to highest),
+and the =grp= vector indicates which of the two groups the row is
+associated with.
+
+If a table called =exptData.txt= contained the table above, this
+command would read it in:
+
+#+ATTR_RAVEL: eval=FALSE
+#+NAME: read-tab
+#+BEGIN_SRC R
+  df <- read.table("exptData.txt", header=TRUE)
+#+END_SRC
+
+  
+**** Simulating Data 
+
+Here, =df= will be simulated. For a start some insertion sites are
+simulated according to a null distribution - i.e. the two sources are
+chosen according to a coin toss at each location. First the chromosome
+lengths are given
+
+#+NAME: chromos
+#+BEGIN_SRC R
+  chr.lens <- structure(c(247249719L, 242951149L, 199501827L,
+      191273063L, 180857866L, 170899992L, 158821424L, 146274826L,
+      140273252L, 135374737L, 134452384L, 132349534L, 114142980L,
+      106368585L, 100338915L, 88827254L, 78774742L, 76117153L,
+      63811651L, 62435964L, 46944323L, 49691432L, 154913754L,
+      57772954L), .Names = c("chr1", "chr2", "chr3", "chr4", "chr5",
+      "chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12",
+      "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19",
+      "chr20", "chr21", "chr22", "chrX", "chrY")) 
+#+END_SRC
+
+Now a sample is drawn from the chromosomes and for each chromosome a
+sample of positions is drawn. The function ~sample.pos~ is defined
+that samples the desired number of positions in the right range. These
+results are placed in a ~data.frame~
+
+#+NAME: chr-samples
+#+BEGIN_SRC R :results output
+  set.seed(13245)
+  chr.names <- names(chr.lens)
+  chr.factor <- factor(chr.names,chr.names)
+  chrs <- sample(chr.factor,40000,repl=TRUE,
+                 prob=chr.lens)
+  chr.ns <- table(chrs)
+  sample.pos <- function(x,y) sort(sample(y,x,repl=TRUE))
+  chr.pos <-
+      mapply( sample.pos, chr.ns,chr.lens,SIMPLIFY=FALSE)
+  df <-
+      data.frame(chromo=rep(chr.factor,chr.ns),
+                 pos=unlist(chr.pos))
+#+END_SRC
+
+#+RESULTS: chr-samples
+
+
+Now two groups are sampled as a logical vector:
+
+#+NAME: grp-samp
+#+BEGIN_SRC R 
+  df$grp <-
+      rbinom(40000, 1, 0.5)==1
+#+END_SRC
+
+#+RESULTS: grp-samp
+
+**** Invoking =gRxCluster=
+
+With this =data.frame= the function can be invoked.
+#+ATTR_RAVEL: keep.source=TRUE
+#+NAME: null-run
+#+BEGIN_SRC R
+  require(geneRxCluster,quietly=TRUE)
+  null.results <-
+      gRxCluster(df$chromo,df$pos,df$grp,15L:30L,nperm=100L)
+  as.data.frame(null.results)[,c(-4,-5)]
+#+END_SRC
+
+#+RESULTS: null-run
+:   seqnames    start      end value1 value2 clump.id target.min
+: 1     chr1 65277420 66569886      2     19        1  4.8536749
+: 2     chr5 90199216 91786531     21      2        2  1.1589974
+: 3     chr9 46794674 49362713     35      5        3  0.1915269
+: 4    chr10 62347867 62907224     15      0        4  1.1043553
+: 5    chr11 33337534 34488514      1     17        5  3.1647822
+
+The function call specified window widths of =15L:30L= sites and
+called for 100 permutations of the data with ~nperm=100L~.
+
+The resulting object, ~null.results~, is a =GRanges= object (which is
+supported by the =GenomicRanges= package \cite{lawrence2013software})
+has 5 clumps. These clumps can be compared to the number of expected
+False Discoveries by invoking the function ~gRxSummary~:
+
+#+NAME: grxsmry
+#+BEGIN_SRC R
+gRxSummary( null.results )
+#+END_SRC
+
+#+RESULTS: grxsmry
+#+begin_example
+$Clusters_Discovered
+[1] 5
+
+$FDR
+[1] 0.6783333
+
+$permutations
+[1] 100
+
+$targetFD
+[1] 5
+
+$call
+gRxCluster(object = df$chromo, starts = df$pos, group = df$grp, 
+    kvals = 15L:30L, nperm = 100L, cutpt.tail.expr = critVal.target(k, 
+        n, target = 5, posdiff = x), cutpt.filter.expr = as.double(apply(x, 
+        2, median, na.rm = TRUE)))
+#+end_example
+
+
+The printed summary indicates 5 clusters (or clumps) were discovered,
+and that the estimated False Discovery Rate was 0.68 is a bit less
+than 1.0, which we know to be the actual False Discovery
+Rate. However, this is well within the bounds of variation in a
+simulation like this. The last part of the printout shows the values
+of all the arguments used in the call to ~gRxCluster~
+including two that were filled in by default, and which will be
+discussed later on.
+
+
+**** Simulating Clumps
+
+Let's look at another example, but first add some true clumps to the
+simulation. We start by sampling chromosomes 30 times:
+
+#+NAME: sim-true
+#+BEGIN_SRC R
+  clump.chrs <- sample(chr.factor,30,repl=TRUE,
+                   prob=chr.lens)
+#+end_src
+
+For each sample a position is chosen using the ~sample.pos~ function
+defined above
+:
+#+begin_src R
+  clump.chr.pos.bound <-
+      sapply(chr.lens[clump.chrs], function(y) sample.pos(1,y))
+#+end_src
+
+For each position, the number of sites in the clump is determined:
+
+#+begin_src R
+  clump.site.ns <- rep(c(15,25,40),each=10)
+#+end_src
+
+For every position, nearby sites ($<1$ Mbase) are sampled:
+
+#+ATTR_RAVEL: keep.source=TRUE 
+#+begin_src R
+  clump.sites <-
+      lapply(seq_along(clump.chrs),
+             function(x) {
+                 chromo <- clump.chrs[x]
+                 n <- clump.site.ns[x]
+                 ctr <- clump.chr.pos.bound[x]
+                 chrLen <- chr.lens[chromo]
+                 if (ctr<chrLen/2)
+                     {
+                         ctr + sample(1e6,n)
+                     } else {
+                         ctr - sample(1e6,n)
+                     }
+             })
+#+end_src
+
+and grps are assigned to each clump
+
+#+begin_src R
+  clump.grps <- rep(0:1,15)==1
+#+end_src
+
+then a =data.frame= is constructed, added to the ~df~ =data.frame= and
+the positions are put in order:
+#+ATTR_RAVEL: keep.source=TRUE
+#+begin_src R  
+  df2 <- data.frame(
+      chromo=rep(clump.chrs,clump.site.ns),
+      pos=unlist(clump.sites),
+      grp=rep(clump.grps,clump.site.ns)
+      )
+
+  df3 <- rbind(df,df2)
+  df3 <- df3[order(df3$chromo,df3$pos),]
+  
+#+END_SRC
+
+Finally, the clump discovery takes place:
+#+ATTR_RAVEL: keep.source=TRUE
+#+NAME: alt-clumps
+#+BEGIN_SRC R
+  alt.results <-
+      gRxCluster(df3$chromo,df3$pos,df3$grp,
+                 15L:30L, nperm=100L)
+  gRxSummary(alt.results)
+  
+#+END_SRC
+
+There were plenty of clumps discovered. Were they the simulated clumps
+or just False Discoveries? Several functions from the ~GenomicRanges~
+package \cite{lawrence2013software} are useful in sorting this out.
+Here sites in the simulated clumps are turned into a ~GRanges~ object.
+
+#+ATTR_RAVEL: keep.source=TRUE
+#+NAME: torf-disc
+#+BEGIN_SRC R
+  df2.GRanges <-
+      GRanges(seqnames=df2$chromo,IRanges(start=df2$pos,width=1),
+              clump=rep(1:30,clump.site.ns))
+#+end_src
+
+The function ~findOverlaps~  is used
+to map the regions in which clumps were found to the sites composing
+those simulated clumps, then the function ~subjectHits~ indicates
+which of the simulated clumps were found.
+
+
+#+begin_src R
+  clumps.found <- subjectHits(findOverlaps(alt.results,df2.GRanges))
+#+end_src
+
+Finally, the number of sites in the simulated clumps that are covered
+by each estimated clump is printed.
+
+#+ATTR_RAVEL: keep.source=TRUE
+#+begin_src R
+  matrix(
+      table(factor(df2.GRanges$clump[ clumps.found ],1:30)),
+      nrow=10,dimnames=list(clump=NULL,site.ns=c(15,25,40)))
+#+END_SRC
+
+Notice that fewer than half of the clumps consisting of just 15 sites
+are found, the clumps of 25 sites are usually found, but usually all
+of the sites composing each clump are not found. The clumps formed
+from 40 sites are found and all or almost all of the sites in each
+clump are found.
+
+And here the clumps that are False Discoveries are counted by using
+the ~countOverlaps~ function
+
+#+NAME: 
+#+BEGIN_SRC R
+sum( countOverlaps(alt.results, df2.GRanges ) == 0 )
+#+END_SRC
+
+#+RESULTS:
+: [1] 5
+
+
+*** Customizing Critical Regions and Filters
+
+
+The critical regions used above can be displayed like this:
+
+#+ATTR_RAVEL: fig=TRUE
+#+NAME: alt-res
+#+BEGIN_SRC R
+  gRxPlot(alt.results,method="criticalRegions")
+#+END_SRC
+
+Notice that the regions are not perfectly symmetrical. This is because
+the proportions of the two classes are not exactly equal:
+
+
+#+BEGIN_SRC R
+  xtabs(~grp, df3)
+#+END_SRC
+
+#+RESULTS:
+: grp
+: FALSE  TRUE 
+: 20278 20522
+
+
+The ~gRxCluster~ function provides a means of using another set of
+criitical regions and another filter expression. The expression for
+settings up critical regions is found in the is found in the
+~metadata()~ slot of ~alt.results~ in the =$call= component:
+
+#+NAME: 
+#+BEGIN_SRC R
+  as.list(metadata(alt.results)$call)[['cutpt.tail.expr']]
+#+END_SRC
+
+#+RESULTS:
+: critVal.target(k, n, target = 5, posdiff = x)
+
+The expression is evaluated in an enviroment that has objects ~k~,
+~n~, and an object called ~x~ that the expression may use.  The object
+~k~ is a set of values for the number of sites to include in a window,
+~n~ is the results of ~table(df3$grp)~, and ~x~ is a matrix of the
+lagged differences of ~df3[,"pos"]~. The lags of order =(15:30)-1=
+(setting those that cross chromosome boundaries to ~NA~) make up the
+columns of ~x~.
+
+One obvious change that a user might make is to reset the value of
+~target~.
+
+#+ATTR_RAVEL: keep.source=TRUE
+#+BEGIN_SRC R
+  generous.target.expr <-
+      quote(critVal.target(k,n, target=20, posdiff=x))
+  generous.results <-
+      gRxCluster(df3$chromo,df3$pos,df3$grp,
+                 15L:30L,nperm=100L,
+                 cutpt.tail.expr=generous.target.expr)
+  gRxSummary(generous.results)                               
+#+END_SRC
+
+Many more discoveries are made, but look at the count of false discoveries:
+
+#+BEGIN_SRC R
+sum( 0==countOverlaps(generous.results,df2.GRanges))
+#+END_SRC
+
+#+RESULTS:
+: [1] 17
+
+
+The filter function is also found in the ~metadata()~ slot of
+~alt.results~ in the =$call= component:
+
+#+NAME: 
+#+BEGIN_SRC R
+  as.list(metadata(alt.results)$call)[['cutpt.filter.expr']]
+#+END_SRC
+
+#+RESULTS:
+: as.double(apply(x, 2, median, na.rm = TRUE))
+
+
+~alt.result~ filtered out the windows whose widths were less than the
+median number of bases. The expression is evaluated in the enviroment
+as before, but only the object ~x~ has been added in at the time the
+expression is called.  If filtering is not desired it can be tunred
+off by using an expression that returns values higher than any seen in
+~x~ such as this:
+
+
+#+ATTR_RAVEL: keep.source=TRUE
+#+BEGIN_SRC R
+  no.filter.expr <- quote(rep(Inf,ncol(x)))
+  no.filter.results <-
+      gRxCluster(df3$chromo,df3$pos,df3$grp,15L:30L,nperm=100L,
+                 cutpt.filter.expr=no.filter.expr)
+  gRxSummary(no.filter.results)
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+$Clusters_Discovered
+[1] 24
+
+$FDR
+[1] 0.146
+
+$permutations
+[1] 100
+
+$targetFD
+[1] 5
+
+$call
+gRxCluster(object = df3$chromo, starts = df3$pos, group = df3$grp, 
+    kvals = 15L:30L, nperm = 100L, cutpt.filter.expr = no.filter.expr, 
+    cutpt.tail.expr = critVal.target(k, n, target = 5, posdiff = x))
+#+end_example
+
+The effect of using non-specific filters to increase power is applied
+in gene-expression microarray studies \cite{bourgon2010independent}.
+The less stringent filtering results in fewer discoveries, but the
+number of false discoveries also decreased:
+
+#+BEGIN_SRC R
+sum( 0==countOverlaps(no.filter.results,df2.GRanges))
+#+END_SRC
+
+
+Here a more stringent filter is used
+
+#+ATTR_RAVEL: keep.source=TRUE
+#+BEGIN_SRC R
+  
+  hard.filter.expr <-
+      quote(apply(x,2,quantile, 0.15, na.rm=TRUE))
+  hard.filter.results <-
+      gRxCluster(df3$chromo,df3$pos,df3$grp,15L:30L,
+                 nperm=100L,
+                 cutpt.filter.expr=hard.filter.expr)
+  gRxSummary(hard.filter.results)
+  
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+$Clusters_Discovered
+[1] 27
+
+$FDR
+[1] 0.1432143
+
+$permutations
+[1] 100
+
+$targetFD
+[1] 5
+
+$call
+gRxCluster(object = df3$chromo, starts = df3$pos, group = df3$grp, 
+    kvals = 15L:30L, nperm = 100L, cutpt.filter.expr = hard.filter.expr, 
+    cutpt.tail.expr = critVal.target(k, n, target = 5, posdiff = x))
+#+end_example
+
+The number of discoveries here needs to be corrected for the number of
+false discoveries if comparisons are to be made:
+
+#+BEGIN_SRC R
+sum( 0==countOverlaps(hard.filter.results,df2.GRanges))
+#+END_SRC
+
+#+RESULTS:
+: [1] 3
+
+It seems to do a bit better than the other two alternatives when true
+and false discovery numbers are considered.
+
+
+#+BEGIN_LaTeX
+  
+  \begin{thebibliography}{1}
+  
+  \bibitem{berry2014}
+   Charles C. Berry and Karen E. Ocwieja and Nirvav Malani and Frederic D. Bushman.
+  \newblock Comparing DNA site clusters with Scan Statistics.
+  \newblock{\em Bioinformatics}, doi: 10.1093/bioinformatics/btu035, 2014. 
+  
+    
+  \bibitem{lawrence2013software}
+    Michael Lawrence, Wolfgang Huber, Herv{\'e} Pag{\`e}s, Patrick Aboyoun, Marc
+    Carlson, Robert Gentleman, Martin~T Morgan, and Vincent~J Carey.
+    \newblock Software for computing and annotating genomic ranges.
+    \newblock {\em PLoS Computational Biology}, 9(8):e1003118, 2013.
+    
+  \bibitem{bourgon2010independent}
+    R.~Bourgon, R.~Gentleman, and W.~Huber.
+    \newblock {Independent filtering increases detection power for high-throughput
+      experiments}.
+    \newblock {\em Proceedings of the National Academy of Sciences}, 107(21):9546,
+    2010.
+  
+  \end{thebibliography}
+#+END_LaTeX
+
+
