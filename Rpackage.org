@@ -2,15 +2,19 @@
 
 * Commentary
 
+This document is best viewed in Emacs Org mode.
+
 What truly matters is referenced in [[make steps]], so look there first.
 
-Note: This file is actually a subset of my working file and will not
-get updated regularly. It may contain deprecated org idioms.
+This file is actually a subset of my working file and will not get
+updated regularly. It may contain deprecated Org mode idioms.
 
-Some of what you will see is stuff I used to work thru the coding. I
-have left that alone. src blocks that are tangled or are referenced in
-noweb chunks of blocks that get tangled eventually show up in the
-package.
+Some of what you will see is stuff I used to work thru the coding - R
+wrappers for snippets of C code and such. I have left that alone. src
+blocks that are tangled or are referenced in noweb chunks of blocks
+that get tangled eventually show up in the package.
+
+[[https://github.com/chasberry/orgmode-accessories][ox-ravel]] is needed to export the vignette.
 
 * geneRxCluster package
 
@@ -5955,9 +5959,8 @@ This one needs to be run in advance to enable filtering to take place.
 
 **** gRxCluster GRanges
 
-:DEVNOTES:
 
-Maybe I will extend gRxClsuter to S4 methods in which case this stuff
+Maybe I will extend gRxCluster to S4 methods in which case this stuff
 might help set up for c("GRanges","missing","missing"), etc methods:
 
 #+NAME: function-R-gRxCluster-Granges
@@ -5989,33 +5992,8 @@ might help set up for c("GRanges","missing","missing"), etc methods:
       }
   
 #+END_SRC
-:END:
 
 **** gRxCluster master
-
-:DEVNOTES:
-
-Need to add back seqnames, if any.
-
-Call With SO or GRanges.
-
-Call with data.frame
-
-Call with args
-
-Maybe define an S4 class for the result to capture show and summary,
-but don;t get carried away with new validity checks.
-
-When using ess-roxy need to spec a value or an error will result 
-
-Maybe add an expression to be eval'ed in .gRxCluster, which could be
-like:
-
-	assign("res",res, envir=tmp.env)
-
-
-:END:
-
 
 #+NAME: function-R-gRxCluster
 #+BEGIN_SRC R :tangle ../geneRxCluster/R/gRxCluster.R
@@ -6164,8 +6142,6 @@ like:
 #+RESULTS: test-R-gRxCluster
 : Loading required package: geneRxCluster
 
-Check the totals in gRxTest against countOverlaps
-
 
 **** debug gRxCluster
 
@@ -6255,10 +6231,6 @@ Check the totals in gRxTest against countOverlaps
 #+end_src
 
 
-Looks like the problem is due to overlaps (start and end) and exact
-matching of start points in which only one or some of the elements are
-included.
-
 #+begin_src R
   smat <- gRxTestRun[['summary_matrix']][[1]]
   sn <- as.character( runValue(as( seqnames(combo.so),"Rle")) )
@@ -6313,10 +6285,6 @@ included.
 
 
 **** gRxCluster summary
-
-There is still work here: maybe add a line to determine 'val' from
-'=attr(metadata(object)$crit[[ i ]],"val")='
-
 
 #+NAME: R-gRxSummary
 #+BEGIN_SRC R :tangle ../geneRxCluster/R/gRxSummary.R
